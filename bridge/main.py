@@ -2,6 +2,7 @@ import asyncio
 import html
 import logging
 import time
+from contextlib import suppress
 from datetime import datetime
 from typing import Any, NamedTuple
 
@@ -27,6 +28,7 @@ from pymax.files.photo import Photo
 from pymax.files.video import Video
 from pymax.types.domain.presence import Presence
 from pymax.types.events.mark import MessageReadEvent
+from pymax.types.events.message import MessageDeleteEvent
 from pymax.types.events.presence import PresenceEvent
 from pymax.types.events.reaction import ReactionUpdateEvent
 from pymax.types.events.typing import TypingEvent
@@ -458,6 +460,50 @@ async def on_max_reaction(event: ReactionUpdateEvent, client: Client) -> None:
             )
 
 
+@client.on_message_edit()
+async def on_max_edit(message: Message, client: Client) -> None:
+    if message.chat_id is None:
+        return
+
+    tg_message_id = topics.tg_message_for(message.chat_id, message.id)
+    if tg_message_id is None:
+        return
+
+    text, _ = await _compose(message.chat_id, message)
+    text = f"{text}\n<i>(исправлено)</i>"
+    try:
+        await bot.edit_message_text(text, chat_id=GROUP_ID, message_id=tg_message_id)
+    except TelegramBadRequest:
+        # У сообщения с файлом правится не текст, а подпись — Telegram считает это разными вещами.
+        with suppress(TelegramBadRequest):
+            await bot.edit_message_caption(
+                chat_id=GROUP_ID, message_id=tg_message_id, caption=text[:CAPTION_LIMIT]
+            )
+
+
+@client.on_message_delete()
+async def on_max_delete(event: MessageDeleteEvent, client: Client) -> None:
+    """Стирать в Telegram не станем: пропавшее сообщение — тоже информация."""
+    for max_message_id in event.message_ids:
+        tg_message_id = topics.tg_message_for(event.chat_id, max_message_id)
+        if tg_message_id is None:
+            continue
+
+        with suppress(TelegramBadRequest):
+            await bot.send_message(
+                GROUP_ID,
+                "<i>это сообщение удалили в MAX</i>",
+                reply_parameters=ReplyParameters(
+                    message_id=tg_message_id, allow_sending_without_reply=True
+                ),
+            )
+
+
+@client.on_disconnect()
+async def on_max_disconnect(error: Exception, reconnect: bool, delay: float) -> None:
+    logger.warning("MAX разорвал связь (%s), переподключение: %s", error, reconnect)
+
+
 @client.on_message()
 async def on_max_message(message: Message, client: Client) -> None:
     my_id = client.me.contact.id if client.me else None
@@ -646,7 +692,17 @@ async def on_tg_reaction(event: MessageReactionUpdated) -> None:
 
 async def main() -> None:
     await bot.set_my_commands(COMMANDS, scope=BotCommandScopeChat(chat_id=GROUP_ID))
-    await asyncio.gather(client.start(), dp.start_polling(bot))
+
+    halves = [asyncio.create_task(client.start()), asyncio.create_task(dp.start_polling(bot))]
+    # Половина моста без второй бесполезна и незаметна: Telegram продолжит принимать
+    # сообщения в никуда. Лучше упасть целиком — запуск поднимет нас заново.
+    done, pending = await asyncio.wait(halves, return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    for task in done:
+        task.result()
+    logger.error("одна из половин моста остановилась — выхожу, чтобы запуститься заново")
 
 
 if __name__ == "__main__":

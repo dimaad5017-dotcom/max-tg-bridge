@@ -1,0 +1,15 @@
+[Unit]
+Description=Мост между MAX и Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bridge
+WorkingDirectory=/opt/max-tg-bridge
+ExecStart=/opt/max-tg-bridge/.venv/bin/python -m bridge.main
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
