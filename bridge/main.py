@@ -74,14 +74,36 @@ ATTACHMENT_LABELS = {
     "SHARE": "ссылка",
 }
 
-# Человек это прислал осознанно, а переслать нечем — стоит сказать вслух.
-UNSUPPORTED = {
-    ContentType.POLL,
-    ContentType.LOCATION,
-    ContentType.VENUE,
-    ContentType.CONTACT,
-    ContentType.DICE,
-    ContentType.GAME,
+# Отметки самого Telegram, а не сообщения человека: на них молчим.
+SERVICE_CONTENT = {
+    ContentType.FORUM_TOPIC_CREATED,
+    ContentType.FORUM_TOPIC_EDITED,
+    ContentType.FORUM_TOPIC_CLOSED,
+    ContentType.FORUM_TOPIC_REOPENED,
+    ContentType.GENERAL_FORUM_TOPIC_HIDDEN,
+    ContentType.GENERAL_FORUM_TOPIC_UNHIDDEN,
+    ContentType.PINNED_MESSAGE,
+    ContentType.NEW_CHAT_MEMBERS,
+    ContentType.LEFT_CHAT_MEMBER,
+    ContentType.NEW_CHAT_TITLE,
+    ContentType.NEW_CHAT_PHOTO,
+    ContentType.DELETE_CHAT_PHOTO,
+    ContentType.MESSAGE_AUTO_DELETE_TIMER_CHANGED,
+    ContentType.VIDEO_CHAT_SCHEDULED,
+    ContentType.VIDEO_CHAT_STARTED,
+    ContentType.VIDEO_CHAT_ENDED,
+    ContentType.VIDEO_CHAT_PARTICIPANTS_INVITED,
+}
+
+CONTENT_NAMES = {
+    ContentType.POLL: "опрос",
+    ContentType.LOCATION: "геопозицию",
+    ContentType.VENUE: "место на карте",
+    ContentType.CONTACT: "контакт",
+    ContentType.DICE: "кубик",
+    ContentType.GAME: "игру",
+    ContentType.STORY: "историю",
+    ContentType.INVOICE: "счёт",
 }
 
 UPLOAD_LIMIT = 50 * 1024 * 1024  # Столько бот вправе залить в Telegram.
@@ -100,6 +122,11 @@ MEDIA_SENDERS = {
 class Media(NamedTuple):
     kind: str
     file: BufferedInputFile
+
+
+class Fetched(NamedTuple):
+    file: BufferedInputFile | None
+    problem: str = ""
 
 
 def _display_name(user: User | None, user_id: int | None) -> str:
@@ -163,21 +190,26 @@ async def _source(chat_id: int, message: Message, attachment: Any, kind: str) ->
     return None
 
 
-async def _download(url: str, name: str) -> BufferedInputFile | None:
+async def _download(url: str, name: str) -> Fetched:
     try:
         async with aiohttp.ClientSession() as session, session.get(url) as response:
             response.raise_for_status()
             if (response.content_length or 0) > UPLOAD_LIMIT:
-                logger.info("вложение %s больше лимита Telegram, отдаём пометкой", name)
-                return None
-            return BufferedInputFile(await response.read(), filename=name)
+                return Fetched(None, "весит больше 50 МБ, столько Telegram не принимает")
+            return Fetched(BufferedInputFile(await response.read(), filename=name))
     except aiohttp.ClientError as error:
         logger.error("не скачать вложение %s: %s", name, error)
-        return None
+        return Fetched(None, f"не скачалось ({type(error).__name__})")
+
+
+def _lost(kind: str, reason: str) -> str:
+    """Что не доехало и почему — иначе человек не узнает, что вообще что-то было."""
+    label = ATTACHMENT_LABELS.get(kind, kind.lower())
+    return f"<b>Не доставлено:</b> {label} — {reason}. Посмотреть можно только в MAX."
 
 
 async def _compose(chat_id: int, message: Message) -> tuple[str, list[Media]]:
-    """Текст сообщения и то, что удалось выкачать; невыкачанное остаётся пометкой."""
+    """Текст сообщения и то, что удалось выкачать; про остальное честно пишем в тексте."""
     lines = [f"<b>{html.escape(await _sender_name(message.sender))}</b>"]
     if message.text:
         lines.append(html.escape(message.text))
@@ -185,14 +217,28 @@ async def _compose(chat_id: int, message: Message) -> tuple[str, list[Media]]:
     media: list[Media] = []
     for attachment in message.attaches:
         kind = getattr(attachment.type, "value", str(attachment.type))
-        source = await _source(chat_id, message, attachment, kind)
-        file = await _download(source[1], source[2]) if source else None
-        if file is not None:
-            media.append(Media(source[0], file))
-        elif kind == "SHARE" and attachment.url:
+
+        if kind == "SHARE" and attachment.url:
             lines.append(html.escape(attachment.url))
-        else:
-            lines.append(f"<i>[{ATTACHMENT_LABELS.get(kind, kind.lower())}]</i>")
+            continue
+        if kind == "CONTACT":
+            who = attachment.name or " ".join(
+                part for part in (attachment.first_name, attachment.last_name) if part
+            )
+            lines.append(f"<i>контакт:</i> {html.escape(who or 'без имени')}")
+            continue
+
+        source = await _source(chat_id, message, attachment, kind)
+        if source is None:
+            lines.append(_lost(kind, "мост такое не умеет"))
+            continue
+
+        fetched = await _download(source[1], source[2])
+        if fetched.file is None:
+            lines.append(_lost(kind, fetched.problem))
+            continue
+
+        media.append(Media(source[0], fetched.file))
 
     return "\n".join(lines), media
 
@@ -378,9 +424,14 @@ async def on_tg_message(tg_message: TgMessage) -> None:
     text = tg_message.text or tg_message.caption or ""
     outgoing = _outgoing(tg_message)
     if not text and outgoing is None:
-        # Молча пропускаем служебное («тема создана» и прочее), ругаемся только на присланное человеком.
-        if tg_message.content_type in UNSUPPORTED:
-            await tg_message.reply("Это MAX не примет. Умею текст, картинку, видео, голосовое и файл.")
+        # Молчим только на служебных отметках Telegram. Всё остальное человек прислал сам,
+        # и лучше зря предупредить, чем дать ему думать, что сообщение ушло.
+        if tg_message.content_type not in SERVICE_CONTENT:
+            what = CONTENT_NAMES.get(tg_message.content_type, f"«{tg_message.content_type}»")
+            await tg_message.reply(
+                f"<b>Не отправлено.</b> MAX не принимает {what} через мост.\n"
+                "Умею текст, фото, видео, голосовое, кружок, стикер и файл."
+            )
         return
 
     attachments = None
@@ -390,7 +441,10 @@ async def on_tg_message(tg_message: TgMessage) -> None:
             # Telegram отдаёт ботам файлы не больше 20 МБ, дальше getFile просто откажет.
             content = await bot.download(downloadable)
         except TelegramBadRequest as error:
-            await tg_message.reply(f"Telegram не отдал файл: {html.escape(str(error))}")
+            await tg_message.reply(
+                "<b>Не отправлено.</b> Telegram не отдал файл боту — обычно это значит, "
+                f"что он тяжелее 20 МБ.\n<i>{html.escape(str(error))}</i>"
+            )
             return
         attachments = [wrapper(content.read(), name=name)]
 
