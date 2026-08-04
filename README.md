@@ -238,7 +238,7 @@ sudo apt install -y python3 python3-venv git
 ```bash
 sudo mkdir -p /opt/max-tg-bridge
 sudo chown "$USER" /opt/max-tg-bridge
-git clone https://github.com/<владелец>/max-tg-bridge.git /opt/max-tg-bridge
+git clone https://github.com/dimaad5017-dotcom/max-tg-bridge.git /opt/max-tg-bridge
 cd /opt/max-tg-bridge
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
