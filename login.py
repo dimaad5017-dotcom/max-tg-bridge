@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from contextlib import suppress
 
 from pymax import Client, ExtraConfig, RegistrationConfig
 from pymax.types.domain.auth import ConfirmRegistrationResponse
@@ -66,7 +67,9 @@ async def main() -> None:
 
         await client.stop()
 
-    await client.start()
+    # stop() из on_start обрывает ожидание внутри start() — для разового входа это и есть финиш.
+    with suppress(asyncio.CancelledError):
+        await client.start()
 
 
 if __name__ == "__main__":
