@@ -6,6 +6,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
+from aiogram.types import BotCommand, BotCommandScopeChat
 from aiogram.types import Message as TgMessage
 from pymax import Client, Message, User
 from pymax.exceptions import ApiError
@@ -29,6 +30,20 @@ topics = TopicMap(MAP_DB)
 
 # Telegram-поллинг стартует раньше, чем поднимется сессия MAX.
 max_ready = asyncio.Event()
+
+COMMANDS = [
+    BotCommand(command="write", description="написать первым по номеру"),
+    BotCommand(command="join", description="вступить в чат MAX по ссылке"),
+    BotCommand(command="help", description="памятка"),
+]
+
+HELP = (
+    "<b>Каждый чат MAX — своя тема.</b> Пишешь в теме — уходит собеседнику.\n\n"
+    "<code>/write +7 999 123-45-67 привет</code> — написать первым\n"
+    "<code>/join ссылка</code> — вступить в чат по приглашению\n\n"
+    "Вложения пока приходят пометкой <i>[фото]</i>, сам файл не передаётся.\n"
+    "Мост живёт, пока открыто окно <code>3-запустить-мост.cmd</code>."
+)
 
 ATTACHMENT_LABELS = {
     "PHOTO": "фото",
@@ -106,6 +121,11 @@ async def on_max_message(message: Message, client: Client) -> None:
     await bot.send_message(GROUP_ID, await _render(message), message_thread_id=topic_id)
 
 
+@dp.message(F.chat.id == GROUP_ID, Command("help", "start"))
+async def on_help_command(tg_message: TgMessage) -> None:
+    await tg_message.answer(HELP, message_thread_id=tg_message.message_thread_id)
+
+
 @dp.message(F.chat.id == GROUP_ID, Command("join"))
 async def on_join_command(tg_message: TgMessage, command: CommandObject) -> None:
     if not command.args:
@@ -173,6 +193,7 @@ async def on_tg_message(tg_message: TgMessage) -> None:
 
 
 async def main() -> None:
+    await bot.set_my_commands(COMMANDS, scope=BotCommandScopeChat(chat_id=GROUP_ID))
     await asyncio.gather(client.start(), dp.start_polling(bot))
 
 
