@@ -1,13 +1,15 @@
 import asyncio
 import html
 import logging
+from typing import Any, NamedTuple
 
+import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BotCommand, BotCommandScopeChat
+from aiogram.types import BotCommand, BotCommandScopeChat, BufferedInputFile
 from aiogram.types import Message as TgMessage
 from pymax import Client, Message, User
 from pymax.exceptions import ApiError
@@ -42,7 +44,7 @@ HELP = (
     "<b>Каждый чат MAX — своя тема.</b> Пишешь в теме — уходит собеседнику.\n\n"
     "<code>/write +7 999 123-45-67 привет</code> — написать первым\n"
     "<code>/join ссылка</code> — вступить в чат по приглашению\n\n"
-    "Вложения пока приходят пометкой <i>[фото]</i>, сам файл не передаётся.\n"
+    "Пропущенное за время простоя мост досылает сам при запуске.\n"
     "Мост живёт, пока открыто окно <code>3-запустить-мост.cmd</code>."
 )
 
@@ -61,6 +63,23 @@ ATTACHMENT_LABELS = {
     "CALL": "звонок",
     "SHARE": "ссылка",
 }
+
+UPLOAD_LIMIT = 50 * 1024 * 1024  # Столько бот вправе залить в Telegram.
+CAPTION_LIMIT = 1024  # Подпись под файлом короче обычного сообщения.
+
+# Чем слать: метод бота и имя аргумента под файл.
+MEDIA_SENDERS = {
+    "photo": ("send_photo", "photo"),
+    "video": ("send_video", "video"),
+    "voice": ("send_voice", "voice"),
+    "document": ("send_document", "document"),
+    "sticker": ("send_sticker", "sticker"),
+}
+
+
+class Media(NamedTuple):
+    kind: str
+    file: BufferedInputFile
 
 
 def _display_name(user: User | None, user_id: int | None) -> str:
@@ -107,19 +126,74 @@ async def _ensure_topic(chat_id: int, title: str | None = None) -> int | None:
     return topic.message_thread_id
 
 
-async def _render(message: Message) -> str:
+async def _source(chat_id: int, message: Message, attachment: Any, kind: str) -> tuple[str, str, str] | None:
+    """(чем слать, откуда качать, имя файла). У видео и файлов ссылку выдают отдельным запросом."""
+    if kind == "PHOTO" and attachment.base_url:
+        return "photo", attachment.base_url, "photo.jpg"
+    if kind == "AUDIO" and attachment.url:
+        return "voice", attachment.url, "voice.ogg"
+    if kind == "STICKER" and attachment.url:
+        return "sticker", attachment.url, "sticker.webp"
+    if kind == "VIDEO":
+        video = await client.get_video_by_id(chat_id, message.id, attachment.video_id)
+        return ("video", video.url, "video.mp4") if video and video.url else None
+    if kind == "FILE":
+        file = await client.get_file_by_id(chat_id, message.id, attachment.file_id)
+        return ("document", file.url, attachment.name or "file") if file and file.url else None
+    return None
+
+
+async def _download(url: str, name: str) -> BufferedInputFile | None:
+    try:
+        async with aiohttp.ClientSession() as session, session.get(url) as response:
+            response.raise_for_status()
+            if (response.content_length or 0) > UPLOAD_LIMIT:
+                logger.info("вложение %s больше лимита Telegram, отдаём пометкой", name)
+                return None
+            return BufferedInputFile(await response.read(), filename=name)
+    except aiohttp.ClientError as error:
+        logger.error("не скачать вложение %s: %s", name, error)
+        return None
+
+
+async def _compose(chat_id: int, message: Message) -> tuple[str, list[Media]]:
+    """Текст сообщения и то, что удалось выкачать; невыкачанное остаётся пометкой."""
     lines = [f"<b>{html.escape(await _sender_name(message.sender))}</b>"]
     if message.text:
         lines.append(html.escape(message.text))
+
+    media: list[Media] = []
     for attachment in message.attaches:
         kind = getattr(attachment.type, "value", str(attachment.type))
-        lines.append(f"<i>[{ATTACHMENT_LABELS.get(kind, kind.lower())}]</i>")
-    return "\n".join(lines)
+        source = await _source(chat_id, message, attachment, kind)
+        file = await _download(source[1], source[2]) if source else None
+        if file is not None:
+            media.append(Media(source[0], file))
+        elif kind == "SHARE" and attachment.url:
+            lines.append(html.escape(attachment.url))
+        else:
+            lines.append(f"<i>[{ATTACHMENT_LABELS.get(kind, kind.lower())}]</i>")
+
+    return "\n".join(lines), media
 
 
 async def _deliver(chat_id: int, message: Message) -> None:
     topic_id = await _ensure_topic(chat_id)
-    await bot.send_message(GROUP_ID, await _render(message), message_thread_id=topic_id)
+    caption, media = await _compose(chat_id, message)
+
+    # Подпись вешаем на первый файл; стикер подписи не принимает, длинный текст в неё не влезет.
+    inline = bool(media) and media[0].kind != "sticker" and len(caption) <= CAPTION_LIMIT
+    for index, item in enumerate(media):
+        method, argument = MEDIA_SENDERS[item.kind]
+        payload = {argument: item.file, "message_thread_id": topic_id}
+        if inline and index == 0:
+            payload["caption"] = caption
+        await getattr(bot, method)(GROUP_ID, **payload)
+        logger.info("переслали %s из чата MAX %s", item.kind, chat_id)
+
+    if not inline:
+        await bot.send_message(GROUP_ID, caption, message_thread_id=topic_id)
+
     topics.remember_delivered(chat_id, message.time)
 
 
