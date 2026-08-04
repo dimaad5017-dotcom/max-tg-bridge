@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import datetime
+from functools import partial
 from typing import Any, NamedTuple, TypeAlias
 
 import aiohttp
@@ -26,7 +27,7 @@ from pymax import Chat, Client, Message, User
 from pymax.exceptions import ApiError
 from pymax.files.file import File
 from pymax.files.photo import Photo
-from pymax.files.video import Video
+from pymax.files.video import Video, VideoNote
 from pymax.types.domain.presence import Presence
 from pymax.types.events.mark import MessageReadEvent
 from pymax.types.events.message import MessageDeleteEvent
@@ -40,7 +41,7 @@ from .storage import TopicMap
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("bridge")
 
-Attachment: TypeAlias = Photo | Video | File
+Attachment: TypeAlias = Photo | Video | VideoNote | File
 
 GROUP_ID = int(require("TG_GROUP_ID"))
 
@@ -679,9 +680,10 @@ def _outgoing(tg_message: TgMessage) -> tuple[Callable[..., Attachment], object,
     if tg_message.video:
         return Video, tg_message.video, tg_message.video.file_name or "video.mp4"
     if tg_message.video_note:
-        # Кружком уехать не может: MAX ещё дожимает загруженное видео, когда pymax уже
-        # отправляет сообщение, и получает "video.not.ready". Обычным видео - доезжает.
-        return Video, tg_message.video_note, "video_note.mp4"
+        # Длительность MAX ждёт в миллисекундах, Telegram отдаёт в секундах. Без неё
+        # pymax полез бы читать её из самого файла и потребовал лишнюю библиотеку.
+        note = partial(VideoNote, duration=tg_message.video_note.duration * 1000)
+        return note, tg_message.video_note, "video_note.mp4"
     if tg_message.animation:
         return Video, tg_message.animation, tg_message.animation.file_name or "animation.mp4"
     if tg_message.voice:
@@ -736,7 +738,8 @@ async def on_tg_message(tg_message: TgMessage) -> None:
                 f"что он тяжелее 20 МБ.\n<i>{html.escape(str(error))}</i>"
             )
             return
-        attachments = [wrapper(content.read(), name=name)]
+        raw = content.read()
+        attachments = [wrapper(raw, name=name)]
 
     # Ответом на служебную «шапку» темы Telegram считает первое сообщение в ней —
     # такого в связке нет, поэтому цитата просто не найдётся, и это правильно.
@@ -748,8 +751,20 @@ async def on_tg_message(tg_message: TgMessage) -> None:
     try:
         sent = await client.send_message(chat_id, text, reply_to=reply_to, attachments=attachments)
     except ApiError as error:
-        await tg_message.reply(f"MAX не принял: {html.escape(str(error))}")
-        return
+        # Кружком MAX принимает только своё: 480x480, 30 кадров в секунду. Телефоны пишут
+        # по-разному, и когда формат не подошёл, лучше отправить то же самое обычным
+        # видео, чем не отправить вовсе. Отказ приходит за доли секунды.
+        if tg_message.video_note is None:
+            await tg_message.reply(f"MAX не принял: {html.escape(str(error))}")
+            return
+        logger.info("кружок не принят (%s), отправляю обычным видео", error)
+        try:
+            sent = await client.send_message(
+                chat_id, text, reply_to=reply_to, attachments=[Video(raw, name="video_note.mp4")]
+            )
+        except ApiError as plain_error:
+            await tg_message.reply(f"MAX не принял: {html.escape(str(plain_error))}")
+            return
 
     if sent is not None:
         topics.pair_messages(chat_id, sent.id, tg_message.message_id)
