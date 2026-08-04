@@ -9,13 +9,20 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ContentType, ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BotCommand, BotCommandScopeChat, BufferedInputFile
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    BufferedInputFile,
+    MessageReactionUpdated,
+    ReactionTypeEmoji,
+)
 from aiogram.types import Message as TgMessage
 from pymax import Client, Message, User
 from pymax.exceptions import ApiError
 from pymax.files.file import File
 from pymax.files.photo import Photo
 from pymax.files.video import Video
+from pymax.types.events.reaction import ReactionUpdateEvent
 
 from .config import MAP_DB, SESSION_NAME, WORK_DIR, normalize_phone, require
 from .storage import TopicMap
@@ -196,17 +203,22 @@ async def _deliver(chat_id: int, message: Message) -> None:
 
     # Подпись вешаем на первый файл; стикер подписи не принимает, длинный текст в неё не влезет.
     inline = bool(media) and media[0].kind != "sticker" and len(caption) <= CAPTION_LIMIT
+    first: TgMessage | None = None
     for index, item in enumerate(media):
         method, argument = MEDIA_SENDERS[item.kind]
         payload = {argument: item.file, "message_thread_id": topic_id}
         if inline and index == 0:
             payload["caption"] = caption
-        await getattr(bot, method)(GROUP_ID, **payload)
+        posted = await getattr(bot, method)(GROUP_ID, **payload)
+        first = first or posted
         logger.info("переслали %s из чата MAX %s", item.kind, chat_id)
 
     if not inline:
-        await bot.send_message(GROUP_ID, caption, message_thread_id=topic_id)
+        posted = await bot.send_message(GROUP_ID, caption, message_thread_id=topic_id)
+        first = first or posted
 
+    if first is not None:
+        topics.pair_messages(chat_id, message.id, first.message_id)
     topics.remember_delivered(chat_id, message.time)
 
 
@@ -241,6 +253,27 @@ async def on_max_start(client: Client) -> None:
     except Exception:
         logger.exception("не вышло догнать пропущенные сообщения")
     max_ready.set()
+
+
+@client.on_reaction_update()
+async def on_max_reaction(event: ReactionUpdateEvent, client: Client) -> None:
+    tg_message_id = topics.tg_message_for(event.chat_id, event.message_id)
+    if tg_message_id is None:
+        return
+
+    # Telegram разрешает боту одну реакцию на сообщение, поэтому берём самую популярную.
+    top = max(event.counters, key=lambda counter: counter.count, default=None)
+    emoji = [ReactionTypeEmoji(emoji=top.reaction)] if top else []
+    try:
+        await bot.set_message_reaction(GROUP_ID, tg_message_id, reaction=emoji)
+    except TelegramBadRequest:
+        # Наборы эмодзи у MAX и Telegram разные, и Telegram берёт не всякое — тогда говорим словами.
+        if top:
+            await bot.send_message(
+                GROUP_ID,
+                f"реакция {html.escape(top.reaction)}",
+                reply_to_message_id=tg_message_id,
+            )
 
 
 @client.on_message()
@@ -363,9 +396,31 @@ async def on_tg_message(tg_message: TgMessage) -> None:
 
     await max_ready.wait()
     try:
-        await client.send_message(chat_id, text, attachments=attachments)
+        sent = await client.send_message(chat_id, text, attachments=attachments)
     except ApiError as error:
         await tg_message.reply(f"MAX не принял: {html.escape(str(error))}")
+        return
+
+    if sent is not None:
+        topics.pair_messages(chat_id, sent.id, tg_message.message_id)
+
+
+@dp.message_reaction(F.chat.id == GROUP_ID)
+async def on_tg_reaction(event: MessageReactionUpdated) -> None:
+    pair = topics.max_message_for(event.message_id)
+    if pair is None:
+        return
+
+    chat_id, max_message_id = pair
+    emoji = next((item.emoji for item in event.new_reaction if item.type == "emoji"), None)
+    await max_ready.wait()
+    try:
+        if emoji:
+            await client.add_reaction(chat_id, max_message_id, emoji)
+        else:
+            await client.remove_reaction(chat_id, max_message_id)
+    except ApiError as error:
+        logger.error("MAX не принял реакцию %s: %s", emoji, error)
 
 
 async def main() -> None:

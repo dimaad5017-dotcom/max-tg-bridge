@@ -21,6 +21,19 @@ class TopicMap:
             "  message_time INTEGER NOT NULL"
             ")"
         )
+        # MAX нумерует сообщения по-своему, Telegram — по-своему; без этой связки
+        # нельзя ни поставить реакцию на нужное сообщение, ни ответить на него.
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS messages ("
+            "  max_chat_id    INTEGER NOT NULL,"
+            "  max_message_id TEXT NOT NULL,"
+            "  tg_message_id  INTEGER NOT NULL,"
+            "  PRIMARY KEY (max_chat_id, max_message_id)"
+            ")"
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS messages_by_tg ON messages (tg_message_id)"
+        )
         self._db.commit()
 
     def topic_for_chat(self, max_chat_id: int) -> int | None:
@@ -41,6 +54,28 @@ class TopicMap:
             (max_chat_id, topic_id, title),
         )
         self._db.commit()
+
+    def pair_messages(self, max_chat_id: int, max_message_id: int | str, tg_message_id: int) -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO messages (max_chat_id, max_message_id, tg_message_id)"
+            " VALUES (?, ?, ?)",
+            (max_chat_id, str(max_message_id), tg_message_id),
+        )
+        self._db.commit()
+
+    def tg_message_for(self, max_chat_id: int, max_message_id: int | str) -> int | None:
+        row = self._db.execute(
+            "SELECT tg_message_id FROM messages WHERE max_chat_id = ? AND max_message_id = ?",
+            (max_chat_id, str(max_message_id)),
+        ).fetchone()
+        return row[0] if row else None
+
+    def max_message_for(self, tg_message_id: int) -> tuple[int, str] | None:
+        row = self._db.execute(
+            "SELECT max_chat_id, max_message_id FROM messages WHERE tg_message_id = ?",
+            (tg_message_id,),
+        ).fetchone()
+        return (row[0], row[1]) if row else None
 
     def delivered_until(self, max_chat_id: int) -> int | None:
         """Время последнего сообщения, доехавшего до Telegram: с него догоняем после простоя."""
