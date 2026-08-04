@@ -29,7 +29,7 @@ if errorlevel 1 goto fail
 if not exist ".env" copy ".env.example" ".env" >nul
 
 echo.
-echo Готово. Дальше по порядку: 1-настройки.cmd, 2-вход-в-MAX.cmd, 3-запустить-мост.cmd
+echo Готово. Дальше по порядку: 2-настроить.cmd, 3-войти-в-MAX.cmd, 4-запустить-мост.cmd
 echo.
 pause
 exit /b 0
