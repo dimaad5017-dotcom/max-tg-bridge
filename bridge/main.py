@@ -480,6 +480,11 @@ async def on_max_read(event: MessageReadEvent, client: Client) -> None:
     if tg_message_id is None:
         return
 
+    # Реакция у бота одна на сообщение. Если собеседник уже поставил свою — молчим:
+    # отметка о прочтении затёрла бы её, а раз отреагировал, значит и прочитал.
+    if topics.has_reaction(tg_message_id):
+        return
+
     try:
         await bot.set_message_reaction(GROUP_ID, tg_message_id, reaction=[ReactionTypeEmoji(emoji=SEEN_MARK)])
     except TelegramBadRequest as error:
@@ -499,12 +504,19 @@ async def on_max_reaction(event: ReactionUpdateEvent, client: Client) -> None:
         await bot.set_message_reaction(GROUP_ID, tg_message_id, reaction=emoji)
     except TelegramBadRequest:
         # Наборы эмодзи у MAX и Telegram разные, и Telegram берёт не всякое — тогда говорим словами.
+        topics.forget_reaction(tg_message_id)
         if top:
             await bot.send_message(
                 GROUP_ID,
                 f"реакция {html.escape(top.reaction)}",
                 reply_to_message_id=tg_message_id,
             )
+    else:
+        # Пометка для отметки о прочтении: занята эта ячейка или свободна.
+        if top:
+            topics.remember_reaction(tg_message_id)
+        else:
+            topics.forget_reaction(tg_message_id)
 
 
 @client.on_message_edit()

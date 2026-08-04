@@ -72,6 +72,27 @@ def test_про_одну_версию_сообщаем_один_раз(topics):
     assert topics.already_announced("1.2.0") is False
 
 
+def test_настоящая_реакция_главнее_отметки_о_прочтении(topics):
+    """Реакция у бота одна на сообщение: помним занятые ячейки, иначе глазки затрут реакцию."""
+    assert topics.has_reaction(310) is False
+
+    topics.remember_reaction(310)
+
+    assert topics.has_reaction(310) is True
+    assert topics.has_reaction(311) is False
+
+
+def test_снятая_реакция_освобождает_место(topics):
+    """Собеседник убрал реакцию — ячейка снова свободна под отметку о прочтении."""
+    topics.remember_reaction(310)
+    topics.forget_reaction(310)
+
+    assert topics.has_reaction(310) is False
+
+    # Снять несуществующую реакцию — не ошибка: MAX присылает и такие обновления.
+    topics.forget_reaction(999)
+
+
 def test_база_переживает_переоткрытие(topics, tmp_path):
     from bridge.storage import TopicMap
 

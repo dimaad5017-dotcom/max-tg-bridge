@@ -41,6 +41,9 @@ class TopicMap:
         # Про новую версию говорим один раз, а не при каждом запуске: мост,
         # повторяющий одно и то же, человек перестаёт читать.
         self._db.execute("CREATE TABLE IF NOT EXISTS announced (version TEXT PRIMARY KEY)")
+        # Реакция у бота одна на сообщение. Помним, где стоит настоящая реакция
+        # собеседника, чтобы отметка о прочтении её не затёрла.
+        self._db.execute("CREATE TABLE IF NOT EXISTS reacted (tg_message_id INTEGER PRIMARY KEY)")
         self._db.commit()
 
     def topic_for_chat(self, max_chat_id: int) -> int | None:
@@ -99,6 +102,20 @@ class TopicMap:
 
     def remember_announced(self, version: str) -> None:
         self._db.execute("INSERT OR IGNORE INTO announced (version) VALUES (?)", (version,))
+        self._db.commit()
+
+    def has_reaction(self, tg_message_id: int) -> bool:
+        """Стоит ли на сообщении настоящая реакция собеседника — её затирать нельзя."""
+        row = self._db.execute("SELECT 1 FROM reacted WHERE tg_message_id = ?", (tg_message_id,)).fetchone()
+        return row is not None
+
+    def remember_reaction(self, tg_message_id: int) -> None:
+        self._db.execute("INSERT OR IGNORE INTO reacted (tg_message_id) VALUES (?)", (tg_message_id,))
+        self._db.commit()
+
+    def forget_reaction(self, tg_message_id: int) -> None:
+        """Реакцию сняли — ячейка снова свободна под отметку о прочтении."""
+        self._db.execute("DELETE FROM reacted WHERE tg_message_id = ?", (tg_message_id,))
         self._db.commit()
 
     def delivered_until(self, max_chat_id: int) -> int | None:
