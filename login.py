@@ -3,19 +3,19 @@
 import asyncio
 import os
 
-from pymax import Client
+from pymax import Client, ExtraConfig, RegistrationConfig
 
 from bridge.config import ENV_FILE, SESSION_NAME, WORK_DIR, normalize_phone
 
 
-def _remember_phone(phone: str) -> None:
+def _remember(key: str, value: str) -> None:
     lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
     for index, line in enumerate(lines):
-        if line.startswith("MAX_PHONE="):
-            lines[index] = f"MAX_PHONE={phone}"
+        if line.startswith(f"{key}="):
+            lines[index] = f"{key}={value}"
             break
     else:
-        lines.append(f"MAX_PHONE={phone}")
+        lines.append(f"{key}={value}")
     ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -23,9 +23,21 @@ def _get_phone() -> str:
     stored = os.getenv("MAX_PHONE", "").strip()
     phone = normalize_phone(stored or input("Твой номер в MAX, например +79991234567: "))
     if phone != stored:
-        _remember_phone(phone)
+        _remember("MAX_PHONE", phone)
         print(f"Номер сохранён как {phone} — MAX принимает только такой формат.\n")
     return phone
+
+
+def _get_registration() -> RegistrationConfig:
+    """Пригодится, только если аккаунта на номере ещё нет: MAX заводит его сразу после SMS."""
+    stored = os.getenv("MAX_NAME", "").strip()
+    if not stored:
+        print("Если аккаунта MAX на этом номере ещё нет, его создадут с этим именем.")
+        stored = input("Имя и фамилия (фамилия не обязательна): ").strip()
+        _remember("MAX_NAME", stored)
+        print()
+    first_name, _, last_name = stored.partition(" ")
+    return RegistrationConfig(first_name=first_name, last_name=last_name.strip() or None)
 
 
 async def main() -> None:
@@ -33,6 +45,7 @@ async def main() -> None:
         phone=_get_phone(),
         work_dir=str(WORK_DIR),
         session_name=SESSION_NAME,
+        extra_config=ExtraConfig(registration_config=_get_registration()),
     )
 
     @client.on_start()
