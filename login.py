@@ -4,8 +4,14 @@ import asyncio
 import os
 
 from pymax import Client, ExtraConfig, RegistrationConfig
+from pymax.types.domain.auth import ConfirmRegistrationResponse
 
 from bridge.config import ENV_FILE, SESSION_NAME, WORK_DIR, normalize_phone
+
+# После регистрации MAX отвечает tokenType=LOGIN, которого нет в pymax.AuthType, и
+# pymax роняет уже выданный токен на валидации. Поле нигде не читается — ослабляем тип.
+ConfirmRegistrationResponse.model_fields["token_type"].annotation = str
+ConfirmRegistrationResponse.model_rebuild(force=True)
 
 
 def _remember(key: str, value: str) -> None:
