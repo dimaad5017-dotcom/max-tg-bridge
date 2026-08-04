@@ -1,0 +1,48 @@
+name: Что-то не работает
+description: Мост не запускается, падает или сообщения не доходят
+labels: ["ошибка"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Сначала загляни в раздел [«Что могло пойти не так»](https://github.com/dimaad5017-dotcom/max-tg-bridge#что-могло-пойти-не-так) —
+        там разобраны частые ошибки. Если там пусто, заполни это.
+
+        **Не вставляй сюда токен бота, свой номер телефона и содержимое `.env`.**
+        Если они попали в текст ошибки — замени их звёздочками.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: Что произошло
+      placeholder: Запустил 4-запустить-мост.cmd, окно мигнуло и закрылось.
+    validations:
+      required: true
+
+  - type: textarea
+    id: error
+    attributes:
+      label: Текст ошибки
+      description: Скопируй последние строки из чёрного окна целиком.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: step
+    attributes:
+      label: На каком шаге
+      placeholder: 3-войти-в-MAX.cmd
+    validations:
+      required: true
+
+  - type: dropdown
+    id: where
+    attributes:
+      label: Где запускаешь
+      options:
+        - Windows, домашний компьютер
+        - Linux VPS
+        - Другое
+    validations:
+      required: true

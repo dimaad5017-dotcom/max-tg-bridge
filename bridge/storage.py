@@ -31,9 +31,7 @@ class TopicMap:
             "  PRIMARY KEY (max_chat_id, max_message_id)"
             ")"
         )
-        self._db.execute(
-            "CREATE INDEX IF NOT EXISTS messages_by_tg ON messages (tg_message_id)"
-        )
+        self._db.execute("CREATE INDEX IF NOT EXISTS messages_by_tg ON messages (tg_message_id)")
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS outgoing ("
             "  max_chat_id   INTEGER PRIMARY KEY,"
@@ -43,15 +41,11 @@ class TopicMap:
         self._db.commit()
 
     def topic_for_chat(self, max_chat_id: int) -> int | None:
-        row = self._db.execute(
-            "SELECT topic_id FROM topics WHERE max_chat_id = ?", (max_chat_id,)
-        ).fetchone()
+        row = self._db.execute("SELECT topic_id FROM topics WHERE max_chat_id = ?", (max_chat_id,)).fetchone()
         return row[0] if row else None
 
     def chat_for_topic(self, topic_id: int) -> int | None:
-        row = self._db.execute(
-            "SELECT max_chat_id FROM topics WHERE topic_id = ?", (topic_id,)
-        ).fetchone()
+        row = self._db.execute("SELECT max_chat_id FROM topics WHERE topic_id = ?", (topic_id,)).fetchone()
         return row[0] if row else None
 
     def link(self, max_chat_id: int, topic_id: int, title: str) -> None:
@@ -63,8 +57,7 @@ class TopicMap:
 
     def pair_messages(self, max_chat_id: int, max_message_id: int | str, tg_message_id: int) -> None:
         self._db.execute(
-            "INSERT OR REPLACE INTO messages (max_chat_id, max_message_id, tg_message_id)"
-            " VALUES (?, ?, ?)",
+            "INSERT OR REPLACE INTO messages (max_chat_id, max_message_id, tg_message_id) VALUES (?, ?, ?)",
             (max_chat_id, str(max_message_id), tg_message_id),
         )
         self._db.commit()

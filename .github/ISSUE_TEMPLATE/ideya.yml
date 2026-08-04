@@ -1,0 +1,25 @@
+name: Идея или вопрос
+description: Хочется, чтобы мост умел что-то ещё
+labels: ["идея"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Что мост уже умеет и чего не умеет принципиально — в таблице
+        [«Что мост умеет и чего не умеет»](https://github.com/dimaad5017-dotcom/max-tg-bridge#что-мост-умеет-и-чего-не-умеет).
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: Что хочется
+      placeholder: Хочу видеть в теме закреплённое сообщение чата.
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Зачем это нужно
+      description: Опиши случай из жизни — так проще понять, стоит ли оно того.
+    validations:
+      required: true

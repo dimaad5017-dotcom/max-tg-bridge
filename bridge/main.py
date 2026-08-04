@@ -535,9 +535,7 @@ async def on_max_delete(event: MessageDeleteEvent, client: Client) -> None:
             await bot.send_message(
                 GROUP_ID,
                 "<i>это сообщение удалили в MAX</i>",
-                reply_parameters=ReplyParameters(
-                    message_id=tg_message_id, allow_sending_without_reply=True
-                ),
+                reply_parameters=ReplyParameters(message_id=tg_message_id, allow_sending_without_reply=True),
             )
 
 

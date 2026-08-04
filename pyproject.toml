@@ -1,0 +1,26 @@
+[project]
+name = "max-tg-bridge"
+version = "1.0.0"
+description = "Мост между MAX и Telegram: каждый чат MAX становится темой в супергруппе"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+    "maxapi-python>=2.3.1",
+    "aiogram>=3.15",
+    "python-dotenv>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/dimaad5017-dotcom/max-tg-bridge"
+Issues = "https://github.com/dimaad5017-dotcom/max-tg-bridge/issues"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# Комментарии и тексты здесь по-русски целиком: правило про «похожие на латиницу»
+# буквы ругается на каждую вторую строку и ничего полезного не находит.
+ignore = ["RUF001", "RUF002", "RUF003"]

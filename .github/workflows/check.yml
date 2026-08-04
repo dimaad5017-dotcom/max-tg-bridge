@@ -1,0 +1,32 @@
+name: Проверка
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Поставить библиотеки
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt ruff
+
+      - name: Линтер
+        run: ruff check bridge
+
+      - name: Форматирование
+        run: ruff format --check bridge
+
+      # Мост без .env не поднимется, поэтому проверяем то, что можно без секретов:
+      # что все модули собираются и что импорты не разъехались с версией pymax.
+      - name: Сборка модулей
+        run: python -m compileall -q bridge
