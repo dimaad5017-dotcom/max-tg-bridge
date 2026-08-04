@@ -34,6 +34,12 @@ class TopicMap:
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS messages_by_tg ON messages (tg_message_id)"
         )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS outgoing ("
+            "  max_chat_id   INTEGER PRIMARY KEY,"
+            "  tg_message_id INTEGER NOT NULL"
+            ")"
+        )
         self._db.commit()
 
     def topic_for_chat(self, max_chat_id: int) -> int | None:
@@ -76,6 +82,20 @@ class TopicMap:
             (tg_message_id,),
         ).fetchone()
         return (row[0], row[1]) if row else None
+
+    def remember_outgoing(self, max_chat_id: int, tg_message_id: int) -> None:
+        """Последнее отправленное нами — на него вешаем отметку, когда собеседник прочитал."""
+        self._db.execute(
+            "INSERT OR REPLACE INTO outgoing (max_chat_id, tg_message_id) VALUES (?, ?)",
+            (max_chat_id, tg_message_id),
+        )
+        self._db.commit()
+
+    def last_outgoing(self, max_chat_id: int) -> int | None:
+        row = self._db.execute(
+            "SELECT tg_message_id FROM outgoing WHERE max_chat_id = ?", (max_chat_id,)
+        ).fetchone()
+        return row[0] if row else None
 
     def delivered_until(self, max_chat_id: int) -> int | None:
         """Время последнего сообщения, доехавшего до Telegram: с него догоняем после простоя."""
