@@ -8,6 +8,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message as TgMessage
 from pymax import Client, Message, User
+from pymax.exceptions import ApiError
 
 from .config import MAP_DB, SESSION_NAME, WORK_DIR, normalize_phone, require
 from .storage import TopicMap
@@ -112,26 +113,51 @@ async def on_join_command(tg_message: TgMessage, command: CommandObject) -> None
         return
 
     await max_ready.wait()
-    chat = await client.join_group(command.args.strip())
+    try:
+        chat = await client.join_group(command.args.strip())
+    except ApiError as error:
+        await tg_message.reply(f"MAX не пустил по этой ссылке: {html.escape(str(error))}")
+        return
+
     await _ensure_topic(chat.id)
     await tg_message.reply(f"Вступил в «{html.escape(chat.title or str(chat.id))}», тема создана.")
 
 
+def _split_phone(args: str) -> tuple[str, str]:
+    """Номер люди пишут как «+7 925 023 63 50», поэтому текст начинается там, где кончился он."""
+    digits = 0
+    index = 0
+    while index < len(args) and (args[index].isdigit() or args[index] in "+()- "):
+        if args[index].isdigit():
+            digits += 1
+            if digits == 11:
+                index += 1
+                break
+        index += 1
+    return args[:index].strip(), args[index:].strip()
+
+
 @dp.message(F.chat.id == GROUP_ID, Command("write"))
 async def on_write_command(tg_message: TgMessage, command: CommandObject) -> None:
-    raw_phone, _, text = (command.args or "").strip().partition(" ")
-    if not raw_phone or not text.strip():
+    raw_phone, text = _split_phone((command.args or "").strip())
+    if not raw_phone or not text:
         await tg_message.reply("Формат: <code>/write +79991234567 привет</code>")
         return
 
     await max_ready.wait()
-    user = await client.search_by_phone(normalize_phone(raw_phone))
+    phone = normalize_phone(raw_phone)
+    try:
+        user = await client.search_by_phone(phone)
+    except ApiError:
+        await tg_message.reply(f"В MAX нет аккаунта на номере {html.escape(phone)}.")
+        return
+
     chat_id = client.get_chat_id(user.id, client.me.contact.id)
-    await client.send_message(chat_id, text.strip())
+    await client.send_message(chat_id, text)
 
     name = _display_name(user, user.id)
     topic_id = await _ensure_topic(chat_id, name)
-    await bot.send_message(GROUP_ID, html.escape(text.strip()), message_thread_id=topic_id)
+    await bot.send_message(GROUP_ID, html.escape(text), message_thread_id=topic_id)
     await tg_message.reply(f"Отправлено «{html.escape(name)}», дальше пиши в его теме.")
 
 
