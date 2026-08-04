@@ -67,12 +67,12 @@ async def _topic_title(chat_id: int) -> str:
     return await _sender_name(peer_id) if peer_id else f"Чат {chat_id}"
 
 
-async def _ensure_topic(chat_id: int) -> int:
+async def _ensure_topic(chat_id: int, title: str | None = None) -> int:
     topic_id = topics.topic_for_chat(chat_id)
     if topic_id is not None:
         return topic_id
 
-    title = await _topic_title(chat_id)
+    title = title or await _topic_title(chat_id)
     topic = await bot.create_forum_topic(chat_id=GROUP_ID, name=title[:128])
     topics.link(chat_id, topic.message_thread_id, title)
     logger.info("создана тема %s для чата MAX %s (%s)", topic.message_thread_id, chat_id, title)
@@ -115,6 +115,24 @@ async def on_join_command(tg_message: TgMessage, command: CommandObject) -> None
     chat = await client.join_group(command.args.strip())
     await _ensure_topic(chat.id)
     await tg_message.reply(f"Вступил в «{html.escape(chat.title or str(chat.id))}», тема создана.")
+
+
+@dp.message(F.chat.id == GROUP_ID, Command("write"))
+async def on_write_command(tg_message: TgMessage, command: CommandObject) -> None:
+    raw_phone, _, text = (command.args or "").strip().partition(" ")
+    if not raw_phone or not text.strip():
+        await tg_message.reply("Формат: <code>/write +79991234567 привет</code>")
+        return
+
+    await max_ready.wait()
+    user = await client.search_by_phone(normalize_phone(raw_phone))
+    chat_id = client.get_chat_id(user.id, client.me.contact.id)
+    await client.send_message(chat_id, text.strip())
+
+    name = _display_name(user, user.id)
+    topic_id = await _ensure_topic(chat_id, name)
+    await bot.send_message(GROUP_ID, html.escape(text.strip()), message_thread_id=topic_id)
+    await tg_message.reply(f"Отправлено «{html.escape(name)}», дальше пиши в его теме.")
 
 
 @dp.message(F.chat.id == GROUP_ID, F.message_thread_id.is_not(None), F.text)
