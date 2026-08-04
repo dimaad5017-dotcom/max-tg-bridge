@@ -46,6 +46,9 @@ HELP = (
     "Мост живёт, пока открыто окно <code>3-запустить-мост.cmd</code>."
 )
 
+# Потолок догона: если мост стоял неделю, лучше отдать хвост, чем завалить группу.
+HISTORY_LIMIT = 40
+
 NO_TOPIC = "но тема не создалась — дай боту право «Управление темами», пока пишу сюда, в General."
 
 ATTACHMENT_LABELS = {
@@ -114,9 +117,42 @@ async def _render(message: Message) -> str:
     return "\n".join(lines)
 
 
+async def _deliver(chat_id: int, message: Message) -> None:
+    topic_id = await _ensure_topic(chat_id)
+    await bot.send_message(GROUP_ID, await _render(message), message_thread_id=topic_id)
+    topics.remember_delivered(chat_id, message.time)
+
+
+async def _catch_up(client: Client) -> None:
+    """MAX отдаёт сообщения живым потоком, поэтому написанное при выключенном мосте берём историей."""
+    my_id = client.me.contact.id if client.me else None
+    # client.chats на старте бывает ещё пустым — список догоняет логин, поэтому спрашиваем сами.
+    for chat in await client.fetch_chats() or []:
+        unread = chat.new_messages or 0
+        delivered = topics.delivered_until(chat.id)
+        if not unread and delivered is None:
+            continue
+
+        depth = min(unread, HISTORY_LIMIT) if delivered is None else HISTORY_LIMIT
+        history = await client.fetch_history(chat.id, backward=max(depth, 1)) or []
+        missed = [
+            message
+            for message in sorted(history, key=lambda message: message.time)
+            if message.sender != my_id and (delivered is None or message.time > delivered)
+        ]
+        for message in missed:
+            await _deliver(chat.id, message)
+        if missed:
+            logger.info("догнали %s пропущенных из чата MAX %s", len(missed), chat.id)
+
+
 @client.on_start()
 async def on_max_start(client: Client) -> None:
     logger.info("MAX подключён, id=%s", client.me.contact.id if client.me else "?")
+    try:
+        await _catch_up(client)
+    except Exception:
+        logger.exception("не вышло догнать пропущенные сообщения")
     max_ready.set()
 
 
@@ -126,8 +162,7 @@ async def on_max_message(message: Message, client: Client) -> None:
     if message.chat_id is None or message.sender == my_id:
         return
 
-    topic_id = await _ensure_topic(message.chat_id)
-    await bot.send_message(GROUP_ID, await _render(message), message_thread_id=topic_id)
+    await _deliver(message.chat_id, message)
 
 
 @dp.message(F.chat.id == GROUP_ID, Command("help", "start"))

@@ -15,6 +15,12 @@ class TopicMap:
             "  title       TEXT NOT NULL"
             ")"
         )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS delivered ("
+            "  max_chat_id  INTEGER PRIMARY KEY,"
+            "  message_time INTEGER NOT NULL"
+            ")"
+        )
         self._db.commit()
 
     def topic_for_chat(self, max_chat_id: int) -> int | None:
@@ -33,5 +39,20 @@ class TopicMap:
         self._db.execute(
             "INSERT OR REPLACE INTO topics (max_chat_id, topic_id, title) VALUES (?, ?, ?)",
             (max_chat_id, topic_id, title),
+        )
+        self._db.commit()
+
+    def delivered_until(self, max_chat_id: int) -> int | None:
+        """Время последнего сообщения, доехавшего до Telegram: с него догоняем после простоя."""
+        row = self._db.execute(
+            "SELECT message_time FROM delivered WHERE max_chat_id = ?", (max_chat_id,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def remember_delivered(self, max_chat_id: int, message_time: int) -> None:
+        self._db.execute(
+            "INSERT INTO delivered (max_chat_id, message_time) VALUES (?, ?)"
+            " ON CONFLICT(max_chat_id) DO UPDATE SET message_time = max(message_time, excluded.message_time)",
+            (max_chat_id, message_time),
         )
         self._db.commit()
