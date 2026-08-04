@@ -1,15 +1,38 @@
 """Разовый вход в MAX по SMS. Запусти один раз, дальше сессия берётся из файла."""
 
 import asyncio
+import os
 
 from pymax import Client
 
-from bridge.config import SESSION_NAME, WORK_DIR, require
+from bridge.config import ENV_FILE, SESSION_NAME, WORK_DIR
+
+
+def _remember_phone(phone: str) -> None:
+    lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith("MAX_PHONE="):
+            lines[index] = f"MAX_PHONE={phone}"
+            break
+    else:
+        lines.append(f"MAX_PHONE={phone}")
+    ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _get_phone() -> str:
+    phone = os.getenv("MAX_PHONE")
+    if phone:
+        return phone
+
+    phone = input("Твой номер в MAX, например +79991234567: ").strip()
+    _remember_phone(phone)
+    print(f"Номер сохранён в {ENV_FILE.name}, больше спрашивать не буду.\n")
+    return phone
 
 
 async def main() -> None:
     client = Client(
-        phone=require("MAX_PHONE"),
+        phone=_get_phone(),
         work_dir=str(WORK_DIR),
         session_name=SESSION_NAME,
     )

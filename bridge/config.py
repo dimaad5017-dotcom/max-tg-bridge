@@ -4,11 +4,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
+ENV_FILE = ROOT / ".env"
 WORK_DIR = ROOT / "cache"
 SESSION_NAME = "max.db"
 MAP_DB = WORK_DIR / "topics.db"
 
-load_dotenv(ROOT / ".env")
+load_dotenv(ENV_FILE)
 
 
 def require(name: str) -> str:
