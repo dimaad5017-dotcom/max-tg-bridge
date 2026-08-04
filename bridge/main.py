@@ -105,7 +105,7 @@ async def on_max_message(message: Message, client: Client) -> None:
     await bot.send_message(GROUP_ID, await _render(message), message_thread_id=topic_id)
 
 
-@dp.message(Command("join"))
+@dp.message(F.chat.id == GROUP_ID, Command("join"))
 async def on_join_command(tg_message: TgMessage, command: CommandObject) -> None:
     if not command.args:
         await tg_message.reply("Пришли ссылку-приглашение: <code>/join ссылка</code>")
