@@ -21,7 +21,7 @@ from aiogram.types import (
     ReplyParameters,
 )
 from aiogram.types import Message as TgMessage
-from pymax import Client, Message, User
+from pymax import Chat, Client, Message, User
 from pymax.exceptions import ApiError
 from pymax.files.file import File
 from pymax.files.photo import Photo
@@ -120,6 +120,22 @@ SERVICE_CONTENT = {
     ContentType.VIDEO_CHAT_ENDED,
     ContentType.VIDEO_CHAT_PARTICIPANTS_INVITED,
 }
+
+# Служебные события чата MAX присылает кодом — без расшифровки это просто «CONTROL».
+CONTROL_EVENTS = {
+    "new": "чат создан",
+    "add": "добавили в чат",
+    "remove": "убрали из чата",
+    "leave": "вышел из чата",
+    "title": "чат переименовали",
+    "icon": "сменили картинку чата",
+    "pin": "закрепили сообщение",
+    "unpin": "открепили сообщение",
+    "system": "служебное событие",
+}
+
+# Чат, из которого мы ушли или где нас выгнали, темой заводить незачем.
+GONE_STATUSES = {"LEFT", "REMOVED", "CLOSED"}
 
 CONTENT_NAMES = {
     ContentType.POLL: "опрос",
@@ -274,6 +290,26 @@ async def _download(url: str, name: str) -> Fetched:
         return Fetched(None, f"не скачалось ({type(error).__name__})")
 
 
+def _call_line(attachment: Any) -> str:
+    """Звонок целиком мост не перенесёт, но про сам факт звонка человек знать должен."""
+    duration = attachment.duration or 0
+    if not duration:
+        return "<i>звонок в MAX — не отвечен</i>"
+
+    seconds = duration // 1000 if duration > 10_000 else duration
+    minutes, rest = divmod(int(seconds), 60)
+    length = f"{minutes} мин {rest} с" if minutes else f"{rest} с"
+    return f"<i>звонок в MAX, {length}</i>"
+
+
+async def _control_line(attachment: Any) -> str:
+    what = CONTROL_EVENTS.get(attachment.event, attachment.event)
+    # Кого именно добавили или убрали, pymax не разбирает — поле доезжает как «лишнее».
+    who = getattr(attachment, "user_ids", None) or getattr(attachment, "userIds", None) or []
+    names = ", ".join([await _sender_name(int(user_id)) for user_id in who])
+    return f"<i>{html.escape(what)}{': ' + html.escape(names) if names else ''}</i>"
+
+
 def _lost(kind: str, reason: str) -> str:
     """Что не доехало и почему — иначе человек не узнает, что вообще что-то было."""
     label = ATTACHMENT_LABELS.get(kind, kind.lower())
@@ -300,6 +336,12 @@ async def _compose(chat_id: int, message: Message) -> tuple[str, list[Media]]:
                 part for part in (attachment.first_name, attachment.last_name) if part
             )
             lines.append(f"<i>контакт:</i> {html.escape(who or 'без имени')}")
+            continue
+        if kind == "CALL":
+            lines.append(_call_line(attachment))
+            continue
+        if kind == "CONTROL":
+            lines.append(await _control_line(attachment))
             continue
 
         source = await _source(chat_id, message, attachment, kind)
@@ -497,6 +539,38 @@ async def on_max_delete(event: MessageDeleteEvent, client: Client) -> None:
                     message_id=tg_message_id, allow_sending_without_reply=True
                 ),
             )
+
+
+@client.on_chat_update()
+async def on_max_chat_update(chat: Chat, client: Client) -> None:
+    """Тему заводит только пришедшее сообщение — а в новой группе может долго стоять тишина."""
+    if topics.topic_for_chat(chat.id) is not None:
+        return
+    if str(getattr(chat.type, "value", chat.type)) == "DIALOG":
+        return
+    if str(chat.status).upper() in GONE_STATUSES:
+        return
+
+    title = chat.title or f"Чат {chat.id}"
+    topic_id = await _ensure_topic(chat.id, title)
+    group_chats[chat.id] = True
+
+    invited_by = await _sender_name(chat.invited_by) if chat.invited_by else ""
+    lines = [
+        f"<b>Тебя добавили в чат «{html.escape(title)}»</b>"
+        if invited_by
+        else f"<b>Новый чат в MAX: «{html.escape(title)}»</b>"
+    ]
+    if invited_by:
+        lines.append(f"пригласил: {html.escape(invited_by)}")
+    count = chat.participants_count or len(chat.participants)
+    if count:
+        lines.append(f"участников: {count}")
+    if chat.description:
+        lines.append(html.escape(chat.description))
+
+    await bot.send_message(GROUP_ID, "\n".join(lines), message_thread_id=topic_id)
+    logger.info("новый чат MAX %s (%s)", chat.id, title)
 
 
 @client.on_disconnect()
