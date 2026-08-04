@@ -682,7 +682,14 @@ def _outgoing(tg_message: TgMessage) -> tuple[type[Photo | Video | File], object
     if tg_message.audio:
         return File, tg_message.audio, tg_message.audio.file_name or "audio.mp3"
     if tg_message.sticker:
-        return File, tg_message.sticker, "sticker.webp"
+        # Стикеры в Telegram трёх разных пород, и заворачивать их надо по-разному:
+        # обычный — картинка, «живой» — короткое видео, а .tgs не умеет никто, кроме
+        # самого Telegram, так что он честно уезжает файлом со своим именем.
+        if tg_message.sticker.is_animated:
+            return File, tg_message.sticker, "sticker.tgs"
+        if tg_message.sticker.is_video:
+            return Video, tg_message.sticker, "sticker.webm"
+        return Photo, tg_message.sticker, "sticker.webp"
     if tg_message.document:
         return File, tg_message.document, tg_message.document.file_name or "file"
     return None
