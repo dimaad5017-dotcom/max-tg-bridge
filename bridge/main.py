@@ -2,9 +2,11 @@ import asyncio
 import html
 import logging
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import datetime
-from typing import Any, NamedTuple
+from functools import partial
+from typing import Any, NamedTuple, TypeAlias
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F
@@ -25,7 +27,8 @@ from pymax import Chat, Client, Message, User
 from pymax.exceptions import ApiError
 from pymax.files.file import File
 from pymax.files.photo import Photo
-from pymax.files.video import Video
+from pymax.files.video import Video, VideoNote
+from pymax.files.voice import Voice
 from pymax.types.domain.presence import Presence
 from pymax.types.events.mark import MessageReadEvent
 from pymax.types.events.message import MessageDeleteEvent
@@ -38,6 +41,8 @@ from .storage import TopicMap
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("bridge")
+
+Attachment: TypeAlias = Photo | Video | VideoNote | Voice | File
 
 GROUP_ID = int(require("TG_GROUP_ID"))
 
@@ -667,18 +672,21 @@ async def on_write_command(tg_message: TgMessage, command: CommandObject) -> Non
     await tg_message.reply(f"Отправлено «{html.escape(name)}», {where}")
 
 
-def _outgoing(tg_message: TgMessage) -> tuple[type[Photo | Video | File], object, str] | None:
-    """(чем завернуть, что скачать, имя файла) — MAX принимает картинку, видео и «просто файл»."""
+def _outgoing(tg_message: TgMessage) -> tuple[Callable[..., Attachment], object, str] | None:
+    """(чем завернуть, что скачать, имя файла) — заворачивать умеет и pymax, и партиал."""
     if tg_message.photo:
         return Photo, tg_message.photo[-1], "photo.jpg"
     if tg_message.video:
         return Video, tg_message.video, tg_message.video.file_name or "video.mp4"
     if tg_message.video_note:
-        return Video, tg_message.video_note, "video_note.mp4"
+        # Длительность MAX ждёт в миллисекундах, Telegram отдаёт в секундах. Без неё
+        # pymax полез бы читать её из самого файла и потребовал лишнюю библиотеку.
+        note = partial(VideoNote, duration=tg_message.video_note.duration * 1000)
+        return note, tg_message.video_note, "video_note.mp4"
     if tg_message.animation:
         return Video, tg_message.animation, tg_message.animation.file_name or "animation.mp4"
     if tg_message.voice:
-        return File, tg_message.voice, "voice.ogg"
+        return Voice, tg_message.voice, "voice.ogg"
     if tg_message.audio:
         return File, tg_message.audio, tg_message.audio.file_name or "audio.mp3"
     if tg_message.sticker:
