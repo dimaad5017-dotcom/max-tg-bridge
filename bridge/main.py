@@ -779,6 +779,9 @@ async def on_tg_reaction(event: MessageReactionUpdated) -> None:
 
 async def main() -> None:
     await bot.set_my_commands(COMMANDS, scope=BotCommandScopeChat(chat_id=GROUP_ID))
+    # Первая строка, по которой видно, что токен рабочий и группа на месте: без неё
+    # окно молчит до первого сообщения, и непонятно, живой мост или нет.
+    logger.info("Telegram на связи, слушаю группу %s", GROUP_ID)
 
     halves = [asyncio.create_task(client.start()), asyncio.create_task(dp.start_polling(bot))]
     # Половина моста без второй бесполезна и незаметна: Telegram продолжит принимать

@@ -8,13 +8,6 @@ if [ ! -x .venv/bin/python ]; then
   exit 1
 fi
 
-# Ctrl+C должен гасить весь цикл, а не только текущий запуск моста.
-trap 'echo; echo "Мост выключен."; exit 0' INT
-
-while true; do
-  .venv/bin/python -m bridge.main
-  echo
-  echo "Мост остановился. Через 10 секунд подниму заново."
-  echo "Чтобы выключить совсем — нажми Ctrl+C."
-  sleep 10
-done
+# Подъём после падения живёт в bridge/run.py — чтобы Windows и Mac вели себя
+# одинаково и сообщения были в одном месте.
+.venv/bin/python -m bridge.run

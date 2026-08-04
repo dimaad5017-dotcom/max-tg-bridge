@@ -1,27 +1,27 @@
 @echo off
-chcp 65001 >nul
+chcp 866 >nul
 cd /d "%~dp0"
-title ╨г╤Б╤В╨░╨╜╨╛╨▓╨║╨░ ╨╝╨╛╤Б╤В╨░ MAX - Telegram
+title Установка моста MAX - Telegram
 
 where python >nul 2>nul
 if errorlevel 1 (
   echo.
-  echo Python ╨╜╨╡ ╨╜╨░╨╣╨┤╨╡╨╜.
-  echo ╨б╨║╨░╤З╨░╨╣ ╨╡╨│╨╛ ╤Б https://www.python.org/downloads/ ╨╕ ╨┐╤А╨╕ ╤Г╤Б╤В╨░╨╜╨╛╨▓╨║╨╡
-  echo ╨╛╨▒╤П╨╖╨░╤В╨╡╨╗╤М╨╜╨╛ ╨┐╨╛╤Б╤В╨░╨▓╤М ╨│╨░╨╗╨╛╤З╨║╤Г "Add python.exe to PATH".
-  echo ╨Я╨╛╤В╨╛╨╝ ╨╖╨░╨┐╤Г╤Б╤В╨╕ ╤Н╤В╨╛╤В ╤Д╨░╨╣╨╗ ╨╡╤Й╤С ╤А╨░╨╖.
+  echo Python не найден.
+  echo Скачай его с https://www.python.org/downloads/ и при установке
+  echo обязательно поставь галочку "Add python.exe to PATH".
+  echo Потом запусти этот файл ещё раз.
   echo.
   pause
   exit /b 1
 )
 
 if not exist ".venv\Scripts\python.exe" (
-  echo ╨б╨╛╨╖╨┤╨░╤О ╨╛╤В╨┤╨╡╨╗╤М╨╜╨╛╨╡ ╨╛╨║╤А╤Г╨╢╨╡╨╜╨╕╨╡ ╨┤╨╗╤П ╨╝╨╛╤Б╤В╨░...
+  echo Создаю отдельное окружение для моста...
   python -m venv .venv
   if errorlevel 1 goto fail
 )
 
-echo ╨б╤В╨░╨▓╨╗╤О ╨▒╨╕╨▒╨╗╨╕╨╛╤В╨╡╨║╨╕, ╤Н╤В╨╛ ╨╖╨░╨╣╨╝╤С╤В ╨╝╨╕╨╜╤Г╤В╤Г...
+echo Ставлю библиотеки, это займёт минуту...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 goto fail
@@ -29,15 +29,15 @@ if errorlevel 1 goto fail
 if not exist ".env" copy ".env.example" ".env" >nul
 
 echo.
-echo ╨У╨╛╤В╨╛╨▓╨╛. ╨Ф╨░╨╗╤М╤И╨╡ ╨┐╨╛ ╨┐╨╛╤А╤П╨┤╨║╤Г: 2-╨╜╨░╤Б╤В╤А╨╛╨╕╤В╤М.cmd, 3-╨▓╨╛╨╣╤В╨╕-╨▓-MAX.cmd, 4-╨╖╨░╨┐╤Г╤Б╤В╨╕╤В╤М-╨╝╨╛╤Б╤В.cmd
+echo Готово. Дальше по порядку: 2-настроить.cmd, 3-войти-в-MAX.cmd, 4-запустить-мост.cmd
 echo.
 pause
 exit /b 0
 
 :fail
 echo.
-echo ╨г╤Б╤В╨░╨╜╨╛╨▓╨║╨░ ╤Б╨╛╤А╨▓╨░╨╗╨░╤Б╤М. ╨б╨║╨╛╨┐╨╕╤А╤Г╨╣ ╨┐╨╛╤Б╨╗╨╡╨┤╨╜╨╕╨╡ ╤Б╤В╤А╨╛╨║╨╕ ╨▓╤Л╤И╨╡ тАФ ╨┐╨╛ ╨╜╨╕╨╝ ╨┐╨╛╨╜╤П╤В╨╜╨╛, ╤З╤В╨╛ ╤Б╨╗╤Г╤З╨╕╨╗╨╛╤Б╤М.
-echo ╨а╨░╨╖╨▒╨╛╤А ╤З╨░╤Б╤В╤Л╤Е ╨╛╤И╨╕╨▒╨╛╨║ ╨╡╤Б╤В╤М ╨▓ README, ╤А╨░╨╖╨┤╨╡╨╗ ┬л╨з╤В╨╛ ╨╝╨╛╨│╨╗╨╛ ╨┐╨╛╨╣╤В╨╕ ╨╜╨╡ ╤В╨░╨║┬╗.
+echo Установка сорвалась. Скопируй последние строки выше - по ним понятно, что случилось.
+echo Разбор частых ошибок: docs\troubleshooting.md
 echo.
 pause
 exit /b 1

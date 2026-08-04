@@ -28,6 +28,7 @@ max-tg-bridge/
 │   ├── config.py              чтение .env, приведение номера к +7XXXXXXXXXX
 │   ├── login.py               вход в MAX по SMS
 │   ├── storage.py             база связок «чат MAX ↔ тема Telegram»
+│   ├── run.py                 запускает мост и поднимает его после падения
 │   └── main.py                сам мост
 ├── requirements.txt           список библиотек для установки
 ├── pyproject.toml             настройки линтера и данные о проекте

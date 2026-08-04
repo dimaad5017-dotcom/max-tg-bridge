@@ -1,12 +1,17 @@
 @echo off
-chcp 65001 >nul
+chcp 866 >nul
 cd /d "%~dp0"
-title ╨Ь╨╛╤Б╤В MAX - Telegram (╨╜╨╡ ╨╖╨░╨║╤А╤Л╨▓╨░╨╣, ╨┐╨╛╨║╨░ ╨╜╤Г╨╢╨╡╨╜)
+title Мост MAX - Telegram (не закрывай, пока нужен)
 
-:loop
-".venv\Scripts\python.exe" -m bridge.main
+if not exist ".venv\Scripts\python.exe" (
+  echo Сначала запусти 1-установить.cmd - без него мост не установлен.
+  echo.
+  pause
+  exit /b 1
+)
+
+".venv\Scripts\python.exe" -m bridge.run
 echo.
-echo ╨Ь╨╛╤Б╤В ╨╛╤Б╤В╨░╨╜╨╛╨▓╨╕╨╗╤Б╤П. ╨з╨╡╤А╨╡╨╖ 10 ╤Б╨╡╨║╤Г╨╜╨┤ ╨┐╨╛╨┤╨╜╨╕╨╝╤Г ╨╖╨░╨╜╨╛╨▓╨╛.
-echo ╨з╤В╨╛╨▒╤Л ╨▓╤Л╨║╨╗╤О╤З╨╕╤В╤М ╤Б╨╛╨▓╤Б╨╡╨╝ тАФ ╨╖╨░╨║╤А╨╛╨╣ ╤Н╤В╨╛ ╨╛╨║╨╜╨╛ ╨║╤А╨╡╤Б╤В╨╕╨║╨╛╨╝.
-timeout /t 10 >nul
-goto loop
+echo Мост выключен. Чтобы включить снова - запусти этот файл ещё раз.
+echo.
+pause
