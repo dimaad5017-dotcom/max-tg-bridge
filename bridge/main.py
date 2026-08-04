@@ -665,7 +665,9 @@ async def on_write_command(tg_message: TgMessage, command: CommandObject) -> Non
 
     name = _display_name(user, user.id)
     topic_id = await _ensure_topic(chat_id, name)
-    await bot.send_message(GROUP_ID, html.escape(text), message_thread_id=topic_id)
+    # Без подписи это эхо неотличимо от входящего, и выходит, будто собеседник написал
+    # первым, хотя он ещё вообще ничего не написал.
+    await bot.send_message(GROUP_ID, f"<b>Ты:</b> {html.escape(text)}", message_thread_id=topic_id)
     where = "дальше пиши в его теме." if topic_id else NO_TOPIC
     await tg_message.reply(f"Отправлено «{html.escape(name)}», {where}")
 
