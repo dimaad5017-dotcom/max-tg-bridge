@@ -9,7 +9,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message as TgMessage
 from pymax import Client, Message, User
 
-from .config import MAP_DB, SESSION_NAME, WORK_DIR, require
+from .config import MAP_DB, SESSION_NAME, WORK_DIR, normalize_phone, require
 from .storage import TopicMap
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -20,7 +20,7 @@ GROUP_ID = int(require("TG_GROUP_ID"))
 bot = Bot(require("TG_BOT_TOKEN"), default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 client = Client(
-    phone=require("MAX_PHONE"),
+    phone=normalize_phone(require("MAX_PHONE")),
     work_dir=str(WORK_DIR),
     session_name=SESSION_NAME,
 )

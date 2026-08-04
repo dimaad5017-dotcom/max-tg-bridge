@@ -5,7 +5,7 @@ import os
 
 from pymax import Client
 
-from bridge.config import ENV_FILE, SESSION_NAME, WORK_DIR
+from bridge.config import ENV_FILE, SESSION_NAME, WORK_DIR, normalize_phone
 
 
 def _remember_phone(phone: str) -> None:
@@ -20,13 +20,11 @@ def _remember_phone(phone: str) -> None:
 
 
 def _get_phone() -> str:
-    phone = os.getenv("MAX_PHONE")
-    if phone:
-        return phone
-
-    phone = input("Твой номер в MAX, например +79991234567: ").strip()
-    _remember_phone(phone)
-    print(f"Номер сохранён в {ENV_FILE.name}, больше спрашивать не буду.\n")
+    stored = os.getenv("MAX_PHONE", "").strip()
+    phone = normalize_phone(stored or input("Твой номер в MAX, например +79991234567: "))
+    if phone != stored:
+        _remember_phone(phone)
+        print(f"Номер сохранён как {phone} — MAX принимает только такой формат.\n")
     return phone
 
 
