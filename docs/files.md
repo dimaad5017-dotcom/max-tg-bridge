@@ -30,8 +30,9 @@ max-tg-bridge/
 │   ├── storage.py             база связок «чат MAX ↔ тема Telegram»
 │   ├── run.py                 запускает мост и поднимает его после падения
 │   └── main.py                сам мост
+├── tests/                     проверки кода, настоящий аккаунт не трогают
 ├── requirements.txt           список библиотек для установки
-├── pyproject.toml             настройки линтера и данные о проекте
+├── pyproject.toml             настройки линтера, тестов и данные о проекте
 ├── deploy/
 │   ├── max-tg-bridge.service  готовая служба для Linux-сервера
 │   └── ru.max-tg-bridge.plist автозапуск для macOS

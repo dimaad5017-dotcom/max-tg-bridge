@@ -15,6 +15,11 @@ dependencies = [
 Homepage = "https://github.com/dimaad5017-dotcom/max-tg-bridge"
 Issues = "https://github.com/dimaad5017-dotcom/max-tg-bridge/issues"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Чтобы `pytest` работал из любой папки, а не только из корня проекта.
+pythonpath = ["."]
+
 [tool.ruff]
 line-length = 110
 target-version = "py311"
