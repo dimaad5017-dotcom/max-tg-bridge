@@ -62,6 +62,16 @@ def test_помним_только_последнее_своё_сообщени�
     assert topics.last_outgoing(386174042) == 9
 
 
+def test_про_одну_версию_сообщаем_один_раз(topics):
+    """Иначе при каждом перезапуске мост писал бы одно и то же, и его перестанут читать."""
+    assert topics.already_announced("1.1.0") is False
+
+    topics.remember_announced("1.1.0")
+
+    assert topics.already_announced("1.1.0") is True
+    assert topics.already_announced("1.2.0") is False
+
+
 def test_база_переживает_переоткрытие(topics, tmp_path):
     from bridge.storage import TopicMap
 

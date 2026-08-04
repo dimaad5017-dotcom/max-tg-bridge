@@ -38,6 +38,9 @@ class TopicMap:
             "  tg_message_id INTEGER NOT NULL"
             ")"
         )
+        # Про новую версию говорим один раз, а не при каждом запуске: мост,
+        # повторяющий одно и то же, человек перестаёт читать.
+        self._db.execute("CREATE TABLE IF NOT EXISTS announced (version TEXT PRIMARY KEY)")
         self._db.commit()
 
     def topic_for_chat(self, max_chat_id: int) -> int | None:
@@ -89,6 +92,14 @@ class TopicMap:
             "SELECT tg_message_id FROM outgoing WHERE max_chat_id = ?", (max_chat_id,)
         ).fetchone()
         return row[0] if row else None
+
+    def already_announced(self, version: str) -> bool:
+        row = self._db.execute("SELECT 1 FROM announced WHERE version = ?", (version,)).fetchone()
+        return row is not None
+
+    def remember_announced(self, version: str) -> None:
+        self._db.execute("INSERT OR IGNORE INTO announced (version) VALUES (?)", (version,))
+        self._db.commit()
 
     def delivered_until(self, max_chat_id: int) -> int | None:
         """Время последнего сообщения, доехавшего до Telegram: с него догоняем после простоя."""

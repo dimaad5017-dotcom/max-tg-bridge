@@ -37,6 +37,7 @@ from pymax.types.events.typing import TypingEvent
 
 from .config import MAP_DB, SESSION_NAME, WORK_DIR, normalize_phone, require
 from .storage import TopicMap
+from .version import PROJECT_URL, installed_version, newer, published_version
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("bridge")
@@ -793,19 +794,51 @@ async def on_tg_reaction(event: MessageReactionUpdated) -> None:
         logger.error("MAX не принял реакцию %s: %s", emoji, error)
 
 
+async def _tell_about_update() -> None:
+    """Пишем в общий раздел группы: новая версия — не про какой-то один чат.
+
+    Молчим, если GitHub недоступен или версия та же. Про одну и ту же версию
+    говорим один раз за всё время, даже если мост перезапускали.
+    """
+    there = await published_version()
+    if there is None:
+        return
+
+    here = installed_version()
+    if not newer(there, here) or topics.already_announced(there):
+        return
+
+    topics.remember_announced(there)
+    logger.info("вышла версия %s, у нас %s", there, here)
+    with suppress(TelegramBadRequest):
+        await bot.send_message(
+            GROUP_ID,
+            f"<b>Вышла новая версия моста: {html.escape(there)}</b> (у тебя {html.escape(here)}).\n\n"
+            "MAX время от времени меняет свой протокол, и старые версии однажды перестают "
+            f'работать. Как обновиться — <a href="{PROJECT_URL}#как-обновиться">короткая '
+            "инструкция</a>, минут на пять.",
+            disable_web_page_preview=True,
+        )
+
+
 async def main() -> None:
     await bot.set_my_commands(COMMANDS, scope=BotCommandScopeChat(chat_id=GROUP_ID))
     # Первая строка, по которой видно, что токен рабочий и группа на месте: без неё
     # окно молчит до первого сообщения, и непонятно, живой мост или нет.
     logger.info("Telegram на связи, слушаю группу %s", GROUP_ID)
 
+    # Отдельной задачей и нарочно не в halves: мост не должен ни ждать GitHub при
+    # запуске, ни падать из-за него. Имя держим, иначе задачу соберёт мусорщик.
+    about_update = asyncio.create_task(_tell_about_update())
+
     halves = [asyncio.create_task(client.start()), asyncio.create_task(dp.start_polling(bot))]
     # Половина моста без второй бесполезна и незаметна: Telegram продолжит принимать
     # сообщения в никуда. Лучше упасть целиком — запуск поднимет нас заново.
     done, pending = await asyncio.wait(halves, return_when=asyncio.FIRST_COMPLETED)
+    about_update.cancel()
     for task in pending:
         task.cancel()
-    await asyncio.gather(*pending, return_exceptions=True)
+    await asyncio.gather(about_update, *pending, return_exceptions=True)
     for task in done:
         task.result()
     logger.error("одна из половин моста остановилась — выхожу, чтобы запуститься заново")
