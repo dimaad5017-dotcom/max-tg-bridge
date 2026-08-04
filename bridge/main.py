@@ -5,6 +5,7 @@ import logging
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BotCommand, BotCommandScopeChat
 from aiogram.types import Message as TgMessage
@@ -45,6 +46,8 @@ HELP = (
     "Мост живёт, пока открыто окно <code>3-запустить-мост.cmd</code>."
 )
 
+NO_TOPIC = "но тема не создалась — дай боту право «Управление темами», пока пишу сюда, в General."
+
 ATTACHMENT_LABELS = {
     "PHOTO": "фото",
     "VIDEO": "видео",
@@ -83,13 +86,19 @@ async def _topic_title(chat_id: int) -> str:
     return await _sender_name(peer_id) if peer_id else f"Чат {chat_id}"
 
 
-async def _ensure_topic(chat_id: int, title: str | None = None) -> int:
+async def _ensure_topic(chat_id: int, title: str | None = None) -> int | None:
+    """None означает «темы не будет» — сообщение уйдёт в General, но не пропадёт."""
     topic_id = topics.topic_for_chat(chat_id)
     if topic_id is not None:
         return topic_id
 
     title = title or await _topic_title(chat_id)
-    topic = await bot.create_forum_topic(chat_id=GROUP_ID, name=title[:128])
+    try:
+        topic = await bot.create_forum_topic(chat_id=GROUP_ID, name=title[:128])
+    except TelegramBadRequest as error:
+        logger.error("не создать тему для чата MAX %s: %s", chat_id, error)
+        return None
+
     topics.link(chat_id, topic.message_thread_id, title)
     logger.info("создана тема %s для чата MAX %s (%s)", topic.message_thread_id, chat_id, title)
     return topic.message_thread_id
@@ -123,7 +132,7 @@ async def on_max_message(message: Message, client: Client) -> None:
 
 @dp.message(F.chat.id == GROUP_ID, Command("help", "start"))
 async def on_help_command(tg_message: TgMessage) -> None:
-    await tg_message.answer(HELP, message_thread_id=tg_message.message_thread_id)
+    await tg_message.answer(HELP)
 
 
 @dp.message(F.chat.id == GROUP_ID, Command("join"))
@@ -139,8 +148,9 @@ async def on_join_command(tg_message: TgMessage, command: CommandObject) -> None
         await tg_message.reply(f"MAX не пустил по этой ссылке: {html.escape(str(error))}")
         return
 
-    await _ensure_topic(chat.id)
-    await tg_message.reply(f"Вступил в «{html.escape(chat.title or str(chat.id))}», тема создана.")
+    topic_id = await _ensure_topic(chat.id)
+    where = "тема создана." if topic_id else NO_TOPIC
+    await tg_message.reply(f"Вступил в «{html.escape(chat.title or str(chat.id))}», {where}")
 
 
 def _split_phone(args: str) -> tuple[str, str]:
@@ -178,7 +188,8 @@ async def on_write_command(tg_message: TgMessage, command: CommandObject) -> Non
     name = _display_name(user, user.id)
     topic_id = await _ensure_topic(chat_id, name)
     await bot.send_message(GROUP_ID, html.escape(text), message_thread_id=topic_id)
-    await tg_message.reply(f"Отправлено «{html.escape(name)}», дальше пиши в его теме.")
+    where = "дальше пиши в его теме." if topic_id else NO_TOPIC
+    await tg_message.reply(f"Отправлено «{html.escape(name)}», {where}")
 
 
 @dp.message(F.chat.id == GROUP_ID, F.message_thread_id.is_not(None), F.text)
