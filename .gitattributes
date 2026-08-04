@@ -1,0 +1,4 @@
+# Скрипт с окончаниями строк Windows не запустится на Mac и Linux: bash
+# спотыкается о невидимый \r прямо в строке с #!/usr/bin/env bash.
+*.sh text eol=lf
+*.cmd text eol=crlf

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Автозапуск моста на macOS. Замени ИМЯ на своё имя пользователя, положи файл
+     в ~/Library/LaunchAgents/ и выполни: launchctl load ~/Library/LaunchAgents/ru.max-tg-bridge.plist -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ru.max-tg-bridge</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/ИМЯ/max-tg-bridge/.venv/bin/python</string>
+        <string>-m</string>
+        <string>bridge.main</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/ИМЯ/max-tg-bridge</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/max-tg-bridge.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/max-tg-bridge.log</string>
+</dict>
+</plist>
