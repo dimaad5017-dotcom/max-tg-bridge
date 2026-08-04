@@ -6,13 +6,16 @@ from typing import Any, NamedTuple
 import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram.enums import ContentType, ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BotCommand, BotCommandScopeChat, BufferedInputFile
 from aiogram.types import Message as TgMessage
 from pymax import Client, Message, User
 from pymax.exceptions import ApiError
+from pymax.files.file import File
+from pymax.files.photo import Photo
+from pymax.files.video import Video
 
 from .config import MAP_DB, SESSION_NAME, WORK_DIR, normalize_phone, require
 from .storage import TopicMap
@@ -62,6 +65,16 @@ ATTACHMENT_LABELS = {
     "CONTACT": "контакт",
     "CALL": "звонок",
     "SHARE": "ссылка",
+}
+
+# Человек это прислал осознанно, а переслать нечем — стоит сказать вслух.
+UNSUPPORTED = {
+    ContentType.POLL,
+    ContentType.LOCATION,
+    ContentType.VENUE,
+    ContentType.CONTACT,
+    ContentType.DICE,
+    ContentType.GAME,
 }
 
 UPLOAD_LIMIT = 50 * 1024 * 1024  # Столько бот вправе залить в Telegram.
@@ -301,15 +314,58 @@ async def on_write_command(tg_message: TgMessage, command: CommandObject) -> Non
     await tg_message.reply(f"Отправлено «{html.escape(name)}», {where}")
 
 
-@dp.message(F.chat.id == GROUP_ID, F.message_thread_id.is_not(None), F.text)
+def _outgoing(tg_message: TgMessage) -> tuple[type[Photo | Video | File], object, str] | None:
+    """(чем завернуть, что скачать, имя файла) — MAX принимает картинку, видео и «просто файл»."""
+    if tg_message.photo:
+        return Photo, tg_message.photo[-1], "photo.jpg"
+    if tg_message.video:
+        return Video, tg_message.video, tg_message.video.file_name or "video.mp4"
+    if tg_message.video_note:
+        return Video, tg_message.video_note, "video_note.mp4"
+    if tg_message.animation:
+        return Video, tg_message.animation, tg_message.animation.file_name or "animation.mp4"
+    if tg_message.voice:
+        return File, tg_message.voice, "voice.ogg"
+    if tg_message.audio:
+        return File, tg_message.audio, tg_message.audio.file_name or "audio.mp3"
+    if tg_message.sticker:
+        return File, tg_message.sticker, "sticker.webp"
+    if tg_message.document:
+        return File, tg_message.document, tg_message.document.file_name or "file"
+    return None
+
+
+@dp.message(F.chat.id == GROUP_ID, F.message_thread_id.is_not(None))
 async def on_tg_message(tg_message: TgMessage) -> None:
     chat_id = topics.chat_for_topic(tg_message.message_thread_id)
     if chat_id is None:
         await tg_message.reply("Эта тема не связана с чатом MAX.")
         return
 
+    text = tg_message.text or tg_message.caption or ""
+    outgoing = _outgoing(tg_message)
+    if not text and outgoing is None:
+        # Молча пропускаем служебное («тема создана» и прочее), ругаемся только на присланное человеком.
+        if tg_message.content_type in UNSUPPORTED:
+            await tg_message.reply("Это MAX не примет. Умею текст, картинку, видео, голосовое и файл.")
+        return
+
+    attachments = None
+    if outgoing is not None:
+        wrapper, downloadable, name = outgoing
+        try:
+            # Telegram отдаёт ботам файлы не больше 20 МБ, дальше getFile просто откажет.
+            content = await bot.download(downloadable)
+        except TelegramBadRequest as error:
+            await tg_message.reply(f"Telegram не отдал файл: {html.escape(str(error))}")
+            return
+        attachments = [wrapper(content.read(), name=name)]
+
     await max_ready.wait()
-    await client.send_message(chat_id, tg_message.text)
+    try:
+        await client.send_message(chat_id, text, attachments=attachments)
+    except ApiError as error:
+        await tg_message.reply(f"MAX не принял: {html.escape(str(error))}")
 
 
 async def main() -> None:
