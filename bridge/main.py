@@ -6,6 +6,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from datetime import datetime
 from functools import partial
+from logging.handlers import RotatingFileHandler
 from typing import Any, NamedTuple, TypeAlias
 
 import aiohttp
@@ -39,7 +40,26 @@ from .config import MAP_DB, SESSION_NAME, WORK_DIR, normalize_phone, require
 from .storage import TopicMap
 from .version import PROJECT_URL, installed_version, newer, published_version
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+def _logging_setup() -> None:
+    """Пишем и в окно, и в файл: окно можно закрыть, а разбираться придётся потом.
+
+    Без файла на вопрос «почему мост молчал» ответить нечем: в окне видно только
+    последние строки, а после перезапуска не видно и их.
+    """
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    # Не даём логу расти без края: три файла по два мегабайта — это недели работы.
+    to_file = RotatingFileHandler(
+        WORK_DIR / "bridge.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8"
+    )
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[logging.StreamHandler(), to_file],
+    )
+
+
+_logging_setup()
 logger = logging.getLogger("bridge")
 
 Attachment: TypeAlias = Photo | Video | VideoNote | File
@@ -428,7 +448,11 @@ async def _catch_up(client: Client) -> None:
     """MAX отдаёт сообщения живым потоком, поэтому написанное при выключенном мосте берём историей."""
     my_id = client.me.contact.id if client.me else None
     # client.chats на старте бывает ещё пустым — список догоняет логин, поэтому спрашиваем сами.
-    for chat in await client.fetch_chats() or []:
+    chats = await client.fetch_chats() or []
+    # Пишем даже про ноль: иначе «ничего не пропустили» и «не увидели ни одного чата»
+    # выглядят в логе одинаково — молчанием, а это совсем разные беды.
+    logger.info("проверяю пропущенное, чатов: %s", len(chats))
+    for chat in chats:
         unread = chat.new_messages or 0
         delivered = topics.delivered_until(chat.id)
         if not unread and delivered is None:
