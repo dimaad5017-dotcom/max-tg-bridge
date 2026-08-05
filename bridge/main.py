@@ -111,6 +111,8 @@ HELP = (
 
 # Потолок догона: если мост стоял неделю, лучше отдать хвост, чем завалить группу.
 HISTORY_LIMIT = 40
+# Сколько ждём догонялку. С запасом: сорок сообщений на чат — это ещё и картинки.
+CATCH_UP_TIMEOUT = 180
 
 NO_TOPIC = "но тема не создалась — дай боту право «Управление темами», пока пишу сюда, в General."
 
@@ -452,6 +454,7 @@ async def _catch_up(client: Client) -> None:
     # Пишем даже про ноль: иначе «ничего не пропустили» и «не увидели ни одного чата»
     # выглядят в логе одинаково — молчанием, а это совсем разные беды.
     logger.info("проверяю пропущенное, чатов: %s", len(chats))
+    total = 0
     for chat in chats:
         unread = chat.new_messages or 0
         delivered = topics.delivered_until(chat.id)
@@ -468,14 +471,24 @@ async def _catch_up(client: Client) -> None:
         for message in missed:
             await _deliver(chat.id, message)
         if missed:
+            total += len(missed)
             logger.info("догнали %s пропущенных из чата MAX %s", len(missed), chat.id)
+
+    # Говорим и про пустой результат. Начатая и не оконченная работа выглядит как
+    # зависание, и человек будет гадать, ждать ему или перезапускать.
+    logger.info("проверка окончена, %s", f"догнал {total}" if total else "пропущенного нет")
 
 
 @client.on_start()
 async def on_max_start(client: Client) -> None:
     logger.info("MAX подключён, id=%s", client.me.contact.id if client.me else "?")
     try:
-        await _catch_up(client)
+        # Со сроком: запрос к MAX может не получить ответа никогда, и тогда мост
+        # застрянет на полпути — живой с виду, но не работающий. Лучше бросить
+        # догонялку и работать дальше: свежие сообщения важнее старых.
+        await asyncio.wait_for(_catch_up(client), timeout=CATCH_UP_TIMEOUT)
+    except TimeoutError:
+        logger.error("догонялка не уложилась в %s секунд — иду дальше без неё", CATCH_UP_TIMEOUT)
     except Exception:
         logger.exception("не вышло догнать пропущенные сообщения")
     max_ready.set()

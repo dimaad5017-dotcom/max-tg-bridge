@@ -20,7 +20,7 @@ TROUBLESHOOTING = "https://github.com/dimaad5017-dotcom/max-tg-bridge/blob/maste
 LOCK_PORT = 47653
 
 
-def take_lock() -> socket.socket | None:
+def take_lock(port: int = LOCK_PORT) -> socket.socket | None:
     """Занимает место единственного моста. None — значит, мост уже где-то запущен.
 
     Два моста на одном аккаунте не удваивают надёжность, а мешают друг другу:
@@ -31,7 +31,7 @@ def take_lock() -> socket.socket | None:
     lock = socket.socket()
     try:
         # Нарочно без SO_REUSEADDR: нам нужно именно то, чтобы второй раз не занялось.
-        lock.bind(("127.0.0.1", LOCK_PORT))
+        lock.bind(("127.0.0.1", port))
     except OSError:
         lock.close()
         return None
