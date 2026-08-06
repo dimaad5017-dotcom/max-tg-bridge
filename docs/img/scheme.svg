@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 500" width="960" height="500" role="img" aria-labelledby="t d">
+  <title id="t">Как устроен мост между MAX и Telegram</title>
+  <desc id="d">Слева чаты MAX, посередине мост — программа на компьютере, справа одна группа Telegram, где каждый чат стал отдельной темой. Ответ из темы возвращается тем же путём обратно в MAX.</desc>
+
+  <defs>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#6B4EFF"/>
+      <stop offset="1" stop-color="#2AABEE"/>
+    </linearGradient>
+    <marker id="arrowMax" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#6B4EFF"/>
+    </marker>
+    <marker id="arrowTg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#2AABEE"/>
+    </marker>
+    <marker id="arrowBack" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#8D9CAB"/>
+    </marker>
+  </defs>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+
+    <rect x="0.5" y="0.5" width="959" height="499" rx="24" fill="#F6F8FB" stroke="#E1E7EE"/>
+
+    <text x="40" y="50" font-size="21" font-weight="700" fill="#1F2933">Как это устроено</text>
+    <text x="40" y="74" font-size="13" fill="#7A8794">каждый чат MAX становится отдельной темой в одной твоей группе Telegram</text>
+
+    <!-- ЛЕВАЯ КОЛОНКА: чаты MAX -->
+    <text x="40" y="116" font-size="13" font-weight="700" fill="#6B4EFF">MAX<tspan font-weight="400" fill="#8A97A6"> · твой аккаунт</tspan></text>
+
+    <rect x="40" y="132" width="240" height="64" rx="14" fill="#FFFFFF" stroke="#E1E7EE"/>
+    <circle cx="72" cy="164" r="18" fill="#6B4EFF"/>
+    <text x="72" y="169" font-size="15" font-weight="600" fill="#FFFFFF" text-anchor="middle">М</text>
+    <text x="102" y="159" font-size="14" font-weight="600" fill="#1F2933">Мария Ивановна</text>
+    <text x="102" y="178" font-size="12" fill="#7A8794">завтра к первому уроку</text>
+
+    <rect x="40" y="208" width="240" height="64" rx="14" fill="#FFFFFF" stroke="#E1E7EE"/>
+    <circle cx="72" cy="240" r="18" fill="#4C6FFF"/>
+    <text x="72" y="245" font-size="15" font-weight="600" fill="#FFFFFF" text-anchor="middle">9</text>
+    <text x="102" y="235" font-size="14" font-weight="600" fill="#1F2933">9А класс</text>
+    <text x="102" y="254" font-size="12" fill="#7A8794">сбор в 8:40 у школы</text>
+
+    <rect x="40" y="284" width="240" height="64" rx="14" fill="#FFFFFF" stroke="#E1E7EE"/>
+    <circle cx="72" cy="316" r="18" fill="#8257FF"/>
+    <text x="72" y="321" font-size="15" font-weight="600" fill="#FFFFFF" text-anchor="middle">Р</text>
+    <text x="102" y="311" font-size="14" font-weight="600" fill="#1F2933">Родители 9А</text>
+    <text x="102" y="330" font-size="12" fill="#7A8794">сдаём на подарок</text>
+
+    <!-- СТРЕЛКА: MAX в мост -->
+    <text x="322" y="200" font-size="11" fill="#8A97A6" text-anchor="middle">входящие</text>
+    <line x1="292" y1="212" x2="350" y2="212" stroke="#6B4EFF" stroke-width="2" marker-end="url(#arrowMax)"/>
+
+    <!-- ЦЕНТР: мост -->
+    <rect x="360" y="170" width="240" height="130" rx="18" fill="#16202A"/>
+    <rect x="460" y="194" width="40" height="4" rx="2" fill="url(#accent)"/>
+    <text x="480" y="230" font-size="22" font-weight="700" fill="#FFFFFF" text-anchor="middle">мост</text>
+    <text x="480" y="254" font-size="12" fill="#93A1B0" text-anchor="middle">программа на твоём компьютере</text>
+    <text x="480" y="274" font-size="11" fill="#6B7A8A" text-anchor="middle">работает, пока открыто её окно</text>
+    <text x="480" y="326" font-size="12" font-weight="600" fill="#4A5866" text-anchor="middle">приложение MAX ставить не нужно</text>
+
+    <!-- СТРЕЛКА: мост в Telegram -->
+    <text x="642" y="200" font-size="11" fill="#8A97A6" text-anchor="middle">в свою тему</text>
+    <line x1="610" y1="212" x2="670" y2="212" stroke="#2AABEE" stroke-width="2" marker-end="url(#arrowTg)"/>
+
+    <!-- ПРАВАЯ КОЛОНКА: группа Telegram -->
+    <text x="680" y="116" font-size="13" font-weight="700" fill="#2AABEE">Telegram<tspan font-weight="400" fill="#8A97A6"> · одна группа</tspan></text>
+
+    <rect x="680" y="132" width="240" height="216" rx="14" fill="#FFFFFF" stroke="#E1E7EE"/>
+    <circle cx="712" cy="162" r="16" fill="#2AABEE"/>
+    <text x="712" y="167" font-size="14" font-weight="600" fill="#FFFFFF" text-anchor="middle">Ш</text>
+    <text x="738" y="158" font-size="14" font-weight="600" fill="#1F2933">Школа 9А</text>
+    <text x="738" y="174" font-size="11" fill="#8A97A6">супергруппа с темами</text>
+    <line x1="692" y1="192" x2="908" y2="192" stroke="#EEF2F6" stroke-width="1"/>
+
+    <text x="700" y="221" font-size="13" font-weight="700" fill="#2AABEE">#</text>
+    <text x="718" y="221" font-size="13" fill="#1F2933">Мария Ивановна</text>
+
+    <text x="700" y="259" font-size="13" font-weight="700" fill="#2AABEE">#</text>
+    <text x="718" y="259" font-size="13" fill="#1F2933">9А класс</text>
+
+    <text x="700" y="297" font-size="13" font-weight="700" fill="#2AABEE">#</text>
+    <text x="718" y="297" font-size="13" fill="#1F2933">Родители 9А</text>
+
+    <text x="700" y="331" font-size="11" fill="#8A97A6">новый чат — тема появится сама</text>
+
+    <!-- ОБРАТНЫЙ ПУТЬ -->
+    <path d="M 800 356 V 382 Q 800 398 784 398 H 176 Q 160 398 160 382 V 366"
+          fill="none" stroke="#8D9CAB" stroke-width="2" marker-end="url(#arrowBack)"/>
+    <text x="480" y="424" font-size="12" fill="#5C6B7A" text-anchor="middle">ответил в теме — сообщение ушло собеседнику в MAX</text>
+
+    <!-- ЧТО ЕЗДИТ -->
+    <text x="480" y="456" font-size="12" fill="#4A5866" text-anchor="middle">текст · фото · видео · голосовые · файлы · ответы · реакции</text>
+    <text x="480" y="477" font-size="11" fill="#93A1B0" text-anchor="middle">звонки не переносятся — MAX ведёт их своим протоколом</text>
+
+  </g>
+</svg>
