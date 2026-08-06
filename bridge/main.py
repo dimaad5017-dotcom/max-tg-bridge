@@ -456,6 +456,15 @@ async def _catch_up(client: Client) -> None:
     logger.info("проверяю пропущенное, чатов: %s", len(chats))
     total = 0
     for chat in chats:
+        # Пока мост был выключен, тебя могли добавить в группу, где ещё никто не написал.
+        # Живое событие о ней уже не придёт, а по сообщениям её не найти — их нет. Такая
+        # группа осталась бы невидимой до первого сообщения, то есть, может быть, надолго.
+        try:
+            await _greet_new_chat(chat)
+        except Exception:
+            # Один странный чат не должен утащить за собой всю догонялку.
+            logger.exception("не вышло поздороваться с чатом MAX %s", chat.id)
+
         unread = chat.new_messages or 0
         delivered = topics.delivered_until(chat.id)
         if not unread and delivered is None:
@@ -593,8 +602,7 @@ async def on_max_delete(event: MessageDeleteEvent, client: Client) -> None:
             )
 
 
-@client.on_chat_update()
-async def on_max_chat_update(chat: Chat, client: Client) -> None:
+async def _greet_new_chat(chat: Chat) -> None:
     """Тему заводит только пришедшее сообщение — а в новой группе может долго стоять тишина."""
     if topics.topic_for_chat(chat.id) is not None:
         return
@@ -623,6 +631,11 @@ async def on_max_chat_update(chat: Chat, client: Client) -> None:
 
     await bot.send_message(GROUP_ID, "\n".join(lines), message_thread_id=topic_id)
     logger.info("новый чат MAX %s (%s)", chat.id, title)
+
+
+@client.on_chat_update()
+async def on_max_chat_update(chat: Chat, client: Client) -> None:
+    await _greet_new_chat(chat)
 
 
 @client.on_disconnect()
