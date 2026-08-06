@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 from aiogram.exceptions import TelegramBadRequest
 from pymax.exceptions import ApiError
+from pymax.protocol import Opcode
 
 from bridge import main
 from bridge.storage import TopicMap
@@ -37,10 +38,14 @@ class ФальшивыйБот:
 
 
 class ФальшивыйMAX:
-    def __init__(self, отказ=None):
+    """Реакции мост шлёт не методом библиотеки, а запросом — за него и цепляемся."""
+
+    def __init__(self, отказ=None, реакция_отказ=None):
         self.стёрто = []
-        self.реакции = []
+        self.запросы = []
         self._отказ = отказ
+        self._реакция_отказ = реакция_отказ
+        self.messages = SimpleNamespace(app=SimpleNamespace(invoke=self._invoke))
 
     async def delete_message(self, chat_id, message_ids, for_me):
         if self._отказ:
@@ -48,11 +53,18 @@ class ФальшивыйMAX:
         self.стёрто.append((chat_id, message_ids, for_me))
         return True
 
-    async def add_reaction(self, chat_id, message_id, emoji):
-        self.реакции.append(emoji)
+    async def _invoke(self, opcode, payload):
+        if self._реакция_отказ:
+            raise self._реакция_отказ
+        self.запросы.append((opcode, payload))
 
-    async def remove_reaction(self, chat_id, message_id):
-        self.реакции.append(None)
+    @property
+    def реакции(self):
+        """Что именно уехало реакцией: эмодзи или None, если реакцию сняли."""
+        return [
+            payload["reaction"]["id"] if opcode == Opcode.MSG_REACTION else None
+            for opcode, payload in self.запросы
+        ]
 
 
 @pytest.fixture
@@ -115,7 +127,38 @@ class TestСтираниеВездеСразу:
         стереть()
 
         assert макс.стёрто != []
-        assert "В MAX стёрто, а здесь не смог" in бот.сказано[0]
+        assert "В MAX стёрто, а здесь нет" in бот.сказано[0]
+
+    def test_называет_настоящую_причину_а_не_первую_попавшуюся(self, мост):
+        """Мост винил нехватку прав. Право было на месте, а сообщение — старше 48 часов.
+
+        Цена ошибки здесь не в коде: человек идёт проверять настройки группы, ничего там
+        не находит и решает, что мост сломан.
+        """
+        отказ = TelegramBadRequest(method=None, message="message can't be deleted")
+        бот, _ = мост(бот=ФальшивыйБот(удаление=отказ))
+
+        стереть()
+
+        assert "48 часов" in бот.сказано[0]
+        assert "право" not in бот.сказано[0].lower()
+
+    def test_про_нехватку_права_говорит_именно_про_право(self, мост):
+        отказ = TelegramBadRequest(method=None, message="not enough rights to delete messages")
+        бот, _ = мост(бот=ФальшивыйБот(удаление=отказ))
+
+        стереть()
+
+        assert "Удаление сообщений" in бот.сказано[0]
+
+    def test_незнакомый_отказ_показывает_как_есть(self, мост):
+        """Придумывать объяснение нельзя, но и молчать нельзя — отдаём чужие слова."""
+        отказ = TelegramBadRequest(method=None, message="что-то новенькое")
+        бот, _ = мост(бот=ФальшивыйБот(удаление=отказ))
+
+        стереть()
+
+        assert "что-то новенькое" in бот.сказано[0]
 
     def test_нечисловой_номер_не_роняет_мост(self, мост):
         """MAX нумерует по-своему, и на битой связке мост должен пожаловаться, а не упасть."""
@@ -163,6 +206,16 @@ class TestЗначокСтирания:
 
         assert макс.стёрто == []
 
+    def test_значок_можно_поменять_в_настройках(self, monkeypatch, мост):
+        """💩 нравится не всем, а значок — дело вкуса, не устройства моста."""
+        monkeypatch.setattr(main, "DELETE_MARK", "🖕")
+        бот, макс = мост()
+
+        asyncio.run(main.on_tg_reaction(реакция("🖕")))
+
+        assert макс.стёрто != []
+        assert бот.удалено == [СООБЩЕНИЕ_TG]
+
     def test_на_незнакомом_сообщении_значок_ничего_не_делает(self, мост):
         """Сообщения, не прошедшего через мост, в MAX нет — стирать нечего."""
         бот, макс = мост()
@@ -171,3 +224,57 @@ class TestЗначокСтирания:
 
         assert макс.стёрто == []
         assert бот.удалено == []
+
+
+class TestРеакцияДоезжаетДоMAX:
+    """Полгода мост уверял, что реакции работают. В MAX не ушла ни одна.
+
+    Библиотека клала номер сообщения строкой, MAX на этом месте ждёт число: отвечал
+    «Expected number» и рвал связь. Заметить это было неоткуда — мост писал про отказ
+    только в лог, а под сообщением в Telegram реакция стояла как ни в чём не бывало.
+    """
+
+    def test_номер_сообщения_уходит_числом(self, мост):
+        """Тот самый гвоздь: строка вместо числа — и MAX отказывает."""
+        _, макс = мост()
+
+        asyncio.run(main.on_tg_reaction(реакция("❤")))
+
+        ((опкод, запрос),) = макс.запросы
+        assert опкод == Opcode.MSG_REACTION
+        assert запрос["messageId"] == int(СООБЩЕНИЕ_MAX)
+        assert not isinstance(запрос["messageId"], str)
+        assert запрос == {
+            "chatId": ЧАТ,
+            "messageId": int(СООБЩЕНИЕ_MAX),
+            "reaction": {"reactionType": "EMOJI", "id": "❤"},
+        }
+
+    def test_снятие_реакции_тоже_числом(self, мост):
+        _, макс = мост()
+
+        asyncio.run(main.on_tg_reaction(реакция(None)))
+
+        ((опкод, запрос),) = макс.запросы
+        assert опкод == Opcode.MSG_CANCEL_REACTION
+        assert запрос == {"chatId": ЧАТ, "messageId": int(СООБЩЕНИЕ_MAX)}
+
+    def test_отказ_не_остаётся_в_логе(self, мост):
+        """Ты видишь свою реакцию под сообщением и уверен, что она ушла. Надо сказать."""
+        отказ = ApiError(opcode=178, message="Expected number at 24")
+        бот, _ = мост(макс=ФальшивыйMAX(реакция_отказ=отказ))
+
+        asyncio.run(main.on_tg_reaction(реакция("❤")))
+
+        assert len(бот.сказано) == 1
+        assert "Реакция не ушла в MAX" in бот.сказано[0]
+
+    def test_битая_связка_не_роняет_мост(self, мост):
+        """MAX нумерует по-своему; на нечисловом номере мост должен пожаловаться, а не упасть."""
+        бот, макс = мост()
+        main.topics.pair_messages(ЧАТ, "не-число", 999)
+
+        asyncio.run(main.on_tg_reaction(реакция("❤", message_id=999)))
+
+        assert макс.запросы == []
+        assert "Реакция не ушла в MAX" in бот.сказано[0]

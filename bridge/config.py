@@ -22,6 +22,11 @@ def normalize_phone(raw: str) -> str:
     return f"+{digits}"
 
 
+def optional(name: str, default: str) -> str:
+    """Настройка, которую можно не заполнять: пустая строка в .env значит «как обычно»."""
+    return (os.getenv(name) or "").strip() or default
+
+
 def require(name: str) -> str:
     value = os.getenv(name)
     if not value:

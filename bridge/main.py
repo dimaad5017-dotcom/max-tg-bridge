@@ -29,6 +29,7 @@ from pymax.exceptions import ApiError
 from pymax.files.file import File
 from pymax.files.photo import Photo
 from pymax.files.video import Video, VideoNote
+from pymax.protocol import Opcode
 from pymax.types.domain.presence import Presence
 from pymax.types.events.mark import MessageReadEvent
 from pymax.types.events.message import MessageDeleteEvent
@@ -36,7 +37,7 @@ from pymax.types.events.presence import PresenceEvent
 from pymax.types.events.reaction import ReactionUpdateEvent
 from pymax.types.events.typing import TypingEvent
 
-from .config import MAP_DB, SESSION_NAME, WORK_DIR, normalize_phone, require
+from .config import MAP_DB, SESSION_NAME, WORK_DIR, normalize_phone, optional, require
 from .storage import TopicMap
 from .version import PROJECT_URL, installed_version, newer, published_version
 
@@ -89,8 +90,15 @@ SEEN_MARK = "👀"
 
 # Об удалении сообщения Telegram боту не сообщает вовсе — такого события просто нет в его API.
 # Поэтому «убрать» приходится показывать тем, что мост увидеть может: реакцией. Этот значок
-# наверх не уходит и реакцией в MAX не становится — он значит «сотри везде».
-DELETE_MARK = "💩"
+# наверх не уходит и реакцией в MAX не становится — он значит «сотри везде». Годится любая
+# реакция, какую Telegram даёт поставить; 💩 хороша тем, что всерьёз её не отправишь.
+DELETE_MARK = optional("TG_DELETE_MARK", "💩")
+
+if DELETE_MARK == SEEN_MARK:
+    raise SystemExit(
+        f"В .env TG_DELETE_MARK={DELETE_MARK} — этим значком мост отмечает прочитанное. "
+        "Возьми любой другой, иначе прочитанное будет стираться само."
+    )
 
 # Свежее этого MAX ещё показывает человека онлайн.
 ONLINE_WINDOW = 90
@@ -842,6 +850,40 @@ async def on_tg_message(tg_message: TgMessage) -> None:
     topics.remember_outgoing(chat_id, tg_message.message_id)
 
 
+def _why_telegram_refused(error: TelegramBadRequest) -> str:
+    """Называет настоящую причину, а не первую правдоподобную.
+
+    Раньше мост на любой отказ говорил «не хватает права». Право оказывалось на месте,
+    человек шёл его проверять и терял время впустую. Лучше сказать точно или честно
+    показать чужие слова, чем гадать.
+    """
+    words = str(error).lower()
+    if "message can't be deleted" in words:
+        return "Telegram не даёт ботам стирать сообщения старше 48 часов, а это — старше."
+    if "not enough rights" in words:
+        return "Боту не хватает права «Удаление сообщений» в настройках группы."
+    if "message to delete not found" in words:
+        return "Сообщения здесь уже нет — видимо, его удалили раньше."
+    return f"Telegram отказал: {html.escape(str(error))}"
+
+
+async def _react(chat_id: int, max_message_id: str, emoji: str | None) -> None:
+    """Ставит или снимает реакцию в MAX.
+
+    Мимо `client.add_reaction` нарочно. Библиотека кладёт номер сообщения строкой, а MAX
+    на этом месте ждёт число: он отвечает «Expected number» и следом рвёт связь. В удалении
+    и правке та же библиотека шлёт число — потому они и работают. Так что шлём сами: тот же
+    опкод, тот же вид запроса, но номер числом. Починят наверху — этот кусок можно выбросить.
+    """
+    payload: dict[str, Any] = {"chatId": chat_id, "messageId": int(max_message_id)}
+    api = client.messages.app
+    if emoji:
+        payload["reaction"] = {"reactionType": "EMOJI", "id": emoji}
+        await api.invoke(Opcode.MSG_REACTION, payload)
+    else:
+        await api.invoke(Opcode.MSG_CANCEL_REACTION, payload)
+
+
 async def _erase(chat_id: int, max_message_id: str, tg_message_id: int) -> None:
     """Стирает сообщение и в MAX, и в Telegram.
 
@@ -869,7 +911,8 @@ async def _erase(chat_id: int, max_message_id: str, tg_message_id: int) -> None:
         logger.error("в MAX удалено, а в Telegram нет: %s", error)
         await bot.send_message(
             GROUP_ID,
-            "<b>В MAX стёрто, а здесь не смог.</b> Удали вручную: боту нужно право «Удаление сообщений».",
+            f"<b>В MAX стёрто, а здесь нет.</b> {_why_telegram_refused(error)} "
+            "Копию удали сам — у собеседника её уже нет.",
             reply_to_message_id=tg_message_id,
         )
         return
@@ -896,12 +939,15 @@ async def on_tg_reaction(event: MessageReactionUpdated) -> None:
         return
 
     try:
-        if emoji:
-            await client.add_reaction(chat_id, max_message_id, emoji)
-        else:
-            await client.remove_reaction(chat_id, max_message_id)
-    except ApiError as error:
+        await _react(chat_id, max_message_id, emoji)
+    except (ApiError, ValueError, TypeError) as error:
+        # Молча проглотить нельзя: ты видишь свою реакцию под сообщением и уверен, что она ушла.
         logger.error("MAX не принял реакцию %s: %s", emoji, error)
+        await bot.send_message(
+            GROUP_ID,
+            f"<b>Реакция не ушла в MAX.</b> {html.escape(str(error))}",
+            reply_to_message_id=event.message_id,
+        )
 
 
 async def _tell_about_update() -> None:
