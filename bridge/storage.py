@@ -54,6 +54,11 @@ class TopicMap:
         row = self._db.execute("SELECT max_chat_id FROM topics WHERE topic_id = ?", (topic_id,)).fetchone()
         return row[0] if row else None
 
+    def title_for_chat(self, max_chat_id: int) -> str | None:
+        """Имя, под которым чат уже заведён темой: спрашивать его у MAX заново незачем."""
+        row = self._db.execute("SELECT title FROM topics WHERE max_chat_id = ?", (max_chat_id,)).fetchone()
+        return row[0] if row else None
+
     def link(self, max_chat_id: int, topic_id: int, title: str) -> None:
         self._db.execute(
             "INSERT OR REPLACE INTO topics (max_chat_id, topic_id, title) VALUES (?, ?, ?)",

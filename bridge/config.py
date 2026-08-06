@@ -27,6 +27,11 @@ def optional(name: str, default: str) -> str:
     return (os.getenv(name) or "").strip() or default
 
 
+def flag(name: str) -> bool:
+    """Настройка «да или нет». Пусто — значит нет; писать можно по-русски и по-английски."""
+    return (os.getenv(name) or "").strip().lower() in {"да", "yes", "on", "true", "1"}
+
+
 def require(name: str) -> str:
     value = os.getenv(name)
     if not value:

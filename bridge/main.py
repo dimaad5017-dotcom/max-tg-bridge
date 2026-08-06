@@ -24,7 +24,7 @@ from aiogram.types import (
     ReplyParameters,
 )
 from aiogram.types import Message as TgMessage
-from pymax import Chat, Client, Message, User
+from pymax import Chat, Client, Message, PrivacySettingsUpdate, User
 from pymax.exceptions import ApiError
 from pymax.files.file import File
 from pymax.files.photo import Photo
@@ -37,7 +37,7 @@ from pymax.types.events.presence import PresenceEvent
 from pymax.types.events.reaction import ReactionUpdateEvent
 from pymax.types.events.typing import TypingEvent
 
-from .config import MAP_DB, SESSION_NAME, WORK_DIR, normalize_phone, optional, require
+from .config import MAP_DB, SESSION_NAME, WORK_DIR, flag, normalize_phone, optional, require
 from .storage import TopicMap
 from .version import PROJECT_URL, installed_version, newer, published_version
 
@@ -103,18 +103,30 @@ if DELETE_MARK == SEEN_MARK:
 # Свежее этого MAX ещё показывает человека онлайн.
 ONLINE_WINDOW = 90
 
+# «В сети» в MAX — это не человек у экрана, а признак interactive в опросе связи:
+# библиотека шлёт его каждые полминуты. Мост держит связь круглые сутки, поэтому
+# по умолчанию мы этот признак снимаем — иначе собеседники видят вечный онлайн там,
+# где никого нет. Кому такой онлайн нужен, ставит в .env MAX_SHOW_ONLINE=да.
+SHOW_ONLINE = flag("MAX_SHOW_ONLINE")
+
 COMMANDS = [
     BotCommand(command="write", description="написать первым по номеру"),
+    BotCommand(command="chats", description="все чаты MAX и их темы"),
     BotCommand(command="join", description="вступить в чат MAX по ссылке"),
+    BotCommand(command="leave", description="выйти из чата — внутри его темы"),
     BotCommand(command="status", description="кто в теме и когда был в сети"),
+    BotCommand(command="hidden", description="прятать ли «был в сети» в MAX"),
     BotCommand(command="help", description="памятка"),
 ]
 
 HELP = (
     "<b>Каждый чат MAX — своя тема.</b> Пишешь в теме — уходит собеседнику.\n\n"
     "<code>/write +7 999 123-45-67 привет</code> — написать первым\n"
+    "<code>/chats</code> — все чаты MAX и какие из них уже стали темами\n"
     "<code>/join ссылка</code> — вступить в чат по приглашению\n"
-    "<code>/status</code> — внутри темы: кто это и когда был в сети\n\n"
+    "<code>/leave</code> — внутри темы: выйти из этого чата MAX\n"
+    "<code>/status</code> — внутри темы: кто это и когда был в сети\n"
+    "<code>/hidden on</code> — спрятать своё «был в сети» в MAX\n\n"
     "Ответь на сообщение — ответ уйдёт в MAX тоже ответом.\n"
     "Исправил своё сообщение — исправится и у собеседника в MAX.\n"
     "Реакция под сообщением уходит в MAX и приходит обратно.\n"
@@ -180,6 +192,12 @@ CONTROL_EVENTS = {
 
 # Чат, из которого мы ушли или где нас выгнали, темой заводить незачем.
 GONE_STATUSES = {"LEFT", "REMOVED", "CLOSED"}
+
+# Список чатов должен влезть в одно сообщение Telegram: в нём потолок 4096 знаков.
+LIST_LIMIT = 60
+
+# Из группы MAX обратно пускают только по приглашению — такое подтверждаем словом.
+YES_WORDS = {"да", "yes", "точно"}
 
 CONTENT_NAMES = {
     ContentType.POLL: "опрос",
@@ -753,6 +771,113 @@ async def on_write_command(tg_message: TgMessage, command: CommandObject) -> Non
     await tg_message.reply(f"Отправлено «{html.escape(name)}», {where}")
 
 
+@dp.message(F.chat.id == GROUP_ID, Command("chats"))
+async def on_chats_command(tg_message: TgMessage) -> None:
+    """Что вообще есть в MAX и что из этого уже стало темой.
+
+    Тему заводит первое сообщение, поэтому половина чатов может быть ещё не видна.
+    Без такого списка о них неоткуда узнать, не открывая сам MAX, — а весь смысл
+    моста в том, чтобы туда не заходить.
+    """
+    await max_ready.wait()
+    chats = await client.fetch_chats() or []
+    lines = []
+    for chat in chats:
+        if str(chat.status).upper() in GONE_STATUSES:
+            continue
+        topic_id = topics.topic_for_chat(chat.id)
+        title = chat.title or topics.title_for_chat(chat.id) or await _topic_title(chat.id)
+        kind = "" if await _is_group(chat.id) else "личка, "
+        where = "тема есть" if topic_id else "темы ещё нет — заведётся с первым сообщением"
+        lines.append(f"• <b>{html.escape(title)}</b> — {kind}{where}")
+
+    if not lines:
+        await tg_message.reply(
+            "В аккаунте MAX не видно ни одного чата. Если он новый — так и должно быть: "
+            "напиши кому-нибудь через <code>/write</code>, и тема появится."
+        )
+        return
+
+    # Телеграм не примет сообщение длиннее 4096 знаков, а чатов может быть много.
+    head = lines[:LIST_LIMIT]
+    tail = f"\n<i>…и ещё {len(lines) - len(head)}</i>" if len(lines) > len(head) else ""
+    await tg_message.reply(f"<b>Чаты в MAX: {len(lines)}</b>\n" + "\n".join(head) + tail)
+
+
+@dp.message(F.chat.id == GROUP_ID, Command("leave"))
+async def on_leave_command(tg_message: TgMessage, command: CommandObject) -> None:
+    """Выйти из группы MAX, не открывая MAX.
+
+    Спрашиваем подтверждение нарочно: вернуться можно только по новому приглашению,
+    а команду легко бросить не в ту тему — темы в списке стоят рядом.
+    """
+    chat_id = topics.chat_for_topic(tg_message.message_thread_id or 0)
+    if chat_id is None:
+        await tg_message.reply("Эту команду надо звать внутри темы того чата, из которого выходишь.")
+        return
+
+    await max_ready.wait()
+    if not await _is_group(chat_id):
+        await tg_message.reply(
+            "Это личка, из неё не выходят. Если человек надоел — молчи или блокируй его в MAX."
+        )
+        return
+
+    # Имя темы уже записано в связке — лишний раз спрашивать его у MAX незачем.
+    title = topics.title_for_chat(chat_id) or await _topic_title(chat_id)
+    if (command.args or "").strip().lower() not in YES_WORDS:
+        await tg_message.reply(
+            f"Выйти из «{html.escape(title)}»? Обратно пустят только по новому приглашению.\n"
+            "Если решил — <code>/leave да</code>"
+        )
+        return
+
+    try:
+        await client.leave_group(chat_id)
+    except ApiError as error:
+        await tg_message.reply(f"MAX не дал выйти: {html.escape(str(error))}")
+        return
+
+    logger.info("вышли из чата MAX %s (%s)", chat_id, title)
+    await tg_message.reply(f"Вышел из «{html.escape(title)}». Тему закрываю, переписка останется.")
+    # Тему не удаляем: написанное в ней — единственный след разговора, который в MAX
+    # уже не открыть. Закрытая тема перестаёт мозолить глаза, но остаётся читаемой.
+    with suppress(TelegramBadRequest):
+        await bot.close_forum_topic(GROUP_ID, tg_message.message_thread_id)
+
+
+@dp.message(F.chat.id == GROUP_ID, Command("hidden"))
+async def on_hidden_command(tg_message: TgMessage, command: CommandObject) -> None:
+    """Прячет «был в сети» в MAX.
+
+    Мост держит связь круглые сутки, а значит для собеседников ты всегда онлайн —
+    даже ночью, даже когда MAX у тебя вообще не установлен. Это не поломка, а то,
+    как MAX считает присутствие; спрятать статус — единственный способ это выключить.
+    """
+    choice = (command.args or "").strip().lower()
+    if choice not in {"on", "off"}:
+        await tg_message.reply(
+            "<code>/hidden on</code> — спрятать «был в сети» в MAX\n"
+            "<code>/hidden off</code> — показывать как обычно\n\n"
+            "Мост держит связь круглые сутки, поэтому без этого ты для всех вечно в сети."
+        )
+        return
+
+    await max_ready.wait()
+    try:
+        await client.change_profile_settings(PrivacySettingsUpdate(hide_online_status=choice == "on"))
+    except ApiError as error:
+        await tg_message.reply(f"MAX не принял настройку: {html.escape(str(error))}")
+        return
+
+    logger.info("скрытый режим: %s", choice)
+    await tg_message.reply(
+        "Спрятал: «был в сети» собеседники больше не видят."
+        if choice == "on"
+        else "«Был в сети» снова виден собеседникам. Помни: с работающим мостом это «всегда»."
+    )
+
+
 def _outgoing(tg_message: TgMessage) -> tuple[Callable[..., Attachment], object, str] | None:
     """(чем завернуть, что скачать, имя файла)."""
     if tg_message.photo:
@@ -1016,6 +1141,11 @@ async def _tell_about_update() -> None:
 
 
 async def main() -> None:
+    # До входа, чтобы и первый запрос ушёл с честным признаком: применяется он
+    # при следующем login или ping, а не мгновенно.
+    client.set_presence(online=SHOW_ONLINE)
+    logger.info("в MAX буду показываться %s", "в сети" if SHOW_ONLINE else "не в сети")
+
     await bot.set_my_commands(COMMANDS, scope=BotCommandScopeChat(chat_id=GROUP_ID))
     # Первая строка, по которой видно, что токен рабочий и группа на месте: без неё
     # окно молчит до первого сообщения, и непонятно, живой мост или нет.
