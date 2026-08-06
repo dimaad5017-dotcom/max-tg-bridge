@@ -87,6 +87,11 @@ group_chats: dict[int, bool] = {}
 # Telegram берёт реакции только из своего списка, галочки в нём нет — «посмотрели» ближе всего.
 SEEN_MARK = "👀"
 
+# Об удалении сообщения Telegram боту не сообщает вовсе — такого события просто нет в его API.
+# Поэтому «убрать» приходится показывать тем, что мост увидеть может: реакцией. Этот значок
+# наверх не уходит и реакцией в MAX не становится — он значит «сотри везде».
+DELETE_MARK = "💩"
+
 # Свежее этого MAX ещё показывает человека онлайн.
 ONLINE_WINDOW = 90
 
@@ -104,7 +109,10 @@ HELP = (
     "<code>/status</code> — внутри темы: кто это и когда был в сети\n\n"
     "Ответь на сообщение — ответ уйдёт в MAX тоже ответом.\n"
     "Реакция под сообщением уходит в MAX и приходит обратно.\n"
-    f"{SEEN_MARK} под твоим сообщением — собеседник его прочитал.\n\n"
+    f"{SEEN_MARK} под твоим сообщением — собеседник его прочитал.\n"
+    f"{DELETE_MARK} под сообщением — стереть его и здесь, и в MAX у всех.\n"
+    "Просто удалить в Telegram мало: в MAX оно останется, "
+    "Telegram про удаление боту не говорит.\n\n"
     "Пропущенное за время простоя мост досылает сам при запуске.\n"
     "Мост живёт, пока открыто окно <code>4-запустить-мост.cmd</code>."
 )
@@ -834,6 +842,40 @@ async def on_tg_message(tg_message: TgMessage) -> None:
     topics.remember_outgoing(chat_id, tg_message.message_id)
 
 
+async def _erase(chat_id: int, max_message_id: str, tg_message_id: int) -> None:
+    """Стирает сообщение и в MAX, и в Telegram.
+
+    Половина дела здесь хуже, чем ничего: человек решил, что сообщения быть не должно,
+    а оно осталось лежать у собеседника. Поэтому сначала MAX, и только если получилось —
+    Telegram. Не вышло — говорим словами, молча не бросаем.
+    """
+    try:
+        await client.delete_message(chat_id, [int(max_message_id)], for_me=False)
+    except (ApiError, ValueError, TypeError) as error:
+        logger.error("MAX не дал удалить сообщение %s: %s", max_message_id, error)
+        await bot.send_message(
+            GROUP_ID,
+            "<b>Не удалено в MAX.</b> Сообщение осталось у собеседника — "
+            f"MAX отказал: {html.escape(str(error))}",
+            reply_to_message_id=tg_message_id,
+        )
+        return
+
+    topics.forget_reaction(tg_message_id)
+    try:
+        await bot.delete_message(GROUP_ID, tg_message_id)
+    except TelegramBadRequest as error:
+        # В MAX уже стёрли, так что промолчать нельзя: иначе решишь, что не сработало вовсе.
+        logger.error("в MAX удалено, а в Telegram нет: %s", error)
+        await bot.send_message(
+            GROUP_ID,
+            "<b>В MAX стёрто, а здесь не смог.</b> Удали вручную: боту нужно право «Удаление сообщений».",
+            reply_to_message_id=tg_message_id,
+        )
+        return
+    logger.info("стёрто везде: чат MAX %s, сообщение %s", chat_id, max_message_id)
+
+
 @dp.message_reaction(F.chat.id == GROUP_ID)
 async def on_tg_reaction(event: MessageReactionUpdated) -> None:
     # Отметку о прочтении мы ставим сами, и она тоже прилетает сюда — иначе получится петля.
@@ -847,6 +889,12 @@ async def on_tg_reaction(event: MessageReactionUpdated) -> None:
     chat_id, max_message_id = pair
     emoji = next((item.emoji for item in event.new_reaction if item.type == "emoji"), None)
     await max_ready.wait()
+
+    if emoji == DELETE_MARK:
+        # Наверх не пересылаем: это не реакция собеседнику, а распоряжение мосту.
+        await _erase(chat_id, max_message_id, event.message_id)
+        return
+
     try:
         if emoji:
             await client.add_reaction(chat_id, max_message_id, emoji)
