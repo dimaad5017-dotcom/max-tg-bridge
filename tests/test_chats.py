@@ -6,6 +6,8 @@
 """
 
 import asyncio
+from contextlib import suppress
+from itertools import count
 from types import SimpleNamespace
 
 import pytest
@@ -56,8 +58,13 @@ def мост(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "bot", бот)
     monkeypatch.setattr(main, "topics", TopicMap(tmp_path / "topics.db"))
 
+    номера = count(100)
+
     async def тема(chat_id, title=None):
-        return 5
+        """Настоящая заводилка тем запоминает связку. Без этого мост объявит тот же чат снова."""
+        topic_id = next(номера)
+        main.topics.link(chat_id, topic_id, title or "")
+        return topic_id
 
     monkeypatch.setattr(main, "_ensure_topic", тема)
     return бот
@@ -110,3 +117,63 @@ def test_странный_чат_не_ломает_догонялку(мост, 
     догонялка([чат(chat_id=1), чат(chat_id=2)])
 
     assert мост.отправлено == []
+
+
+@pytest.fixture
+def дозор(мост, monkeypatch):
+    """Гоняет фоновую проверку списка чатов ровно столько кругов, сколько ей дали ответов.
+
+    Настоящий дозор крутится вечно и спит по пять минут. Здесь сон убираем в ноль,
+    а кончившиеся ответы обрываем отменой — так же, как обрывает задачу сам мост.
+    """
+
+    def запустить(*круги):
+        осталось = list(круги)
+
+        class MAXпоКругам:
+            async def fetch_chats(self):
+                if not осталось:
+                    raise asyncio.CancelledError
+                ответ = осталось.pop(0)
+                if isinstance(ответ, Exception):
+                    raise ответ
+                return ответ
+
+        monkeypatch.setattr(main, "client", MAXпоКругам())
+        monkeypatch.setattr(main, "NEW_CHAT_SCAN", 0)
+        monkeypatch.setattr(main, "max_ready", asyncio.Event())
+
+        async def прогнать():
+            main.max_ready.set()
+            with suppress(asyncio.CancelledError):
+                await main._watch_new_chats()
+
+        asyncio.run(прогнать())
+
+    return запустить
+
+
+class TestДозорЗаНовымиЧатами:
+    """Событие о добавлении в группу приходит от MAX, и проверить его нечем: добавляют не мы.
+
+    Поэтому мост ещё и сам перечитывает список. Иначе тихая группа, где никто не написал,
+    оставалась бы невидимой до перезапуска — а мост держат запущенным неделями.
+    """
+
+    def test_замечает_группу_появившуюся_на_ходу(self, мост, дозор):
+        дозор([], [чат(title="9А класс")])
+
+        assert len(мост.отправлено) == 1
+        assert "9А класс" in мост.отправлено[0]
+
+    def test_об_одной_группе_дважды_не_говорит(self, мост, дозор):
+        """Дозор видит тот же список каждые пять минут — объявление не должно повторяться."""
+        дозор([чат()], [чат()])
+
+        assert len(мост.отправлено) == 1
+
+    def test_сбой_max_не_обрывает_дозор(self, мост, дозор):
+        """Сеть моргает; если после этого дозор замолчит, добавление в чат мы пропустим."""
+        дозор(RuntimeError("MAX не ответил"), [чат(title="9А класс")])
+
+        assert len(мост.отправлено) == 1

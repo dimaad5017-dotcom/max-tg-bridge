@@ -162,6 +162,8 @@ HELP = (
 HISTORY_LIMIT = 40
 # Сколько ждём догонялку. С запасом: сорок сообщений на чат — это ещё и картинки.
 CATCH_UP_TIMEOUT = 180
+# Как часто перечитываем список чатов на случай, что о новом MAX не сказал.
+NEW_CHAT_SCAN = 300
 
 NO_TOPIC = "но тема не создалась — дай боту право «Управление темами», пока пишу сюда, в General."
 
@@ -759,6 +761,31 @@ async def on_max_chat_update(chat: Chat, client: Client) -> None:
     await _greet_new_chat(chat)
 
 
+async def _watch_new_chats() -> None:
+    """Раз в пять минут перечитывает список чатов: вдруг тебя куда-то добавили, а мост не заметил.
+
+    О новом чате MAX присылает событие, и обычно тема заводится сразу. Но что событие
+    приходит всегда, проверить нельзя: для этого нужно, чтобы кто-то добавил тебя в
+    группу — в чужих руках. А пропустить его дорого. Тихую группу, где ещё никто не
+    написал, по сообщениям не найти: сообщений нет. Значит, она осталась бы невидимой
+    до следующего запуска моста — а мост работает неделями подряд.
+
+    Поэтому не полагаемся на одно событие. Один запрос в пять минут не стоит ничего,
+    а школьный чат, о котором не узнал, стоит дорого. Объявление от этого не задвоится:
+    чат с уже заведённой темой `_greet_new_chat` пропускает.
+    """
+    await max_ready.wait()
+    while True:
+        await asyncio.sleep(NEW_CHAT_SCAN)
+        try:
+            for chat in await client.fetch_chats() or []:
+                await _greet_new_chat(chat)
+        except Exception:
+            # Сеть моргнула или MAX ответил не так. Это не повод бросать проверку
+            # навсегда — через пять минут спросим снова.
+            logger.exception("не вышло перечитать список чатов MAX")
+
+
 @client.on_disconnect()
 async def on_max_disconnect(error: Exception, reconnect: bool, delay: float) -> None:
     logger.warning("MAX разорвал связь (%s), переподключение: %s", error, reconnect)
@@ -1312,18 +1339,18 @@ async def main() -> None:
     # окно молчит до первого сообщения, и непонятно, живой мост или нет.
     logger.info("Telegram на связи, слушаю группу %s", GROUP_ID)
 
-    # Отдельной задачей и нарочно не в halves: мост не должен ни ждать GitHub при
-    # запуске, ни падать из-за него. Имя держим, иначе задачу соберёт мусорщик.
-    about_update = asyncio.create_task(_tell_about_update())
+    # Отдельными задачами и нарочно не в halves: без них мост остаётся мостом, а вот
+    # ждать из-за них запуск или падать вместе с ними — незачем. Имена держим, иначе
+    # задачу без ссылки соберёт мусорщик прямо на ходу.
+    extras = [asyncio.create_task(_tell_about_update()), asyncio.create_task(_watch_new_chats())]
 
     halves = [asyncio.create_task(client.start()), asyncio.create_task(dp.start_polling(bot))]
     # Половина моста без второй бесполезна и незаметна: Telegram продолжит принимать
     # сообщения в никуда. Лучше упасть целиком — запуск поднимет нас заново.
     done, pending = await asyncio.wait(halves, return_when=asyncio.FIRST_COMPLETED)
-    about_update.cancel()
-    for task in pending:
+    for task in [*extras, *pending]:
         task.cancel()
-    await asyncio.gather(about_update, *pending, return_exceptions=True)
+    await asyncio.gather(*extras, *pending, return_exceptions=True)
     for task in done:
         task.result()
     logger.error("одна из половин моста остановилась — выхожу, чтобы запуститься заново")
