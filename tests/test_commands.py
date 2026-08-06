@@ -9,6 +9,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from aiogram.filters import Command
 from pymax.exceptions import ApiError
 
 from bridge import main
@@ -80,6 +81,45 @@ def мост(monkeypatch, tmp_path):
         return макс, бот
 
     return собрать
+
+
+def разбор():
+    """Кто разбирает сообщения из группы — в том порядке, в каком их спросят."""
+    return main.dp.message.handlers
+
+
+def имена_команд(обработчик):
+    return {имя for f in обработчик.filters if isinstance(f.callback, Command) for имя in f.callback.commands}
+
+
+class TestКомандыВообщеДоходят:
+    """Тесты зовут обработчики напрямую и потому слепы к порядку записи.
+
+    А порядок здесь решает всё: aiogram спрашивает обработчики по очереди и
+    останавливается на первом подходящем. `on_tg_message` забирает вообще всё,
+    что написано в теме, — команда ниже него молча уехала бы собеседнику текстом
+    и не позвалась бы ни разу. Сами команды при этом продолжали бы «проходить тесты».
+    """
+
+    def test_ни_одна_команда_не_спрятана_за_пересылкой(self):
+        порядок = [о.callback.__name__ for о in разбор()]
+        пересылка = порядок.index("on_tg_message")
+        спрятанные = [имя for имя in порядок[пересылка + 1 :] if имя.endswith("_command")]
+
+        assert спрятанные == [], f"эти команды не сработают в теме: {спрятанные}"
+
+    def test_каждая_команда_из_меню_кем_то_разбирается(self):
+        """Команда в меню бота без обработчика — обещание, которое некому выполнить."""
+        обещано = {c.command for c in main.COMMANDS}
+        сделано = set().union(*(имена_команд(о) for о in разбор()))
+
+        assert обещано <= сделано, f"обещаны в меню, но не разбираются: {обещано - сделано}"
+
+    def test_памятка_рассказывает_про_все_команды(self):
+        """Памятку правят руками, а команды добавляют кодом — разъехаться проще простого."""
+        забыты = [c.command for c in main.COMMANDS if f"/{c.command}" not in main.HELP]
+
+        assert забыты == [], f"есть в меню, но не в памятке: {забыты}"
 
 
 def приказ(args=""):
