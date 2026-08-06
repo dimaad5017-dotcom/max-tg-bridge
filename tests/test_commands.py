@@ -18,8 +18,8 @@ from bridge.storage import TopicMap
 ГРУППА, ЛИЧКА, ТЕМА = 777, 93794816, 5
 
 
-def чат(chat_id=ГРУППА, title="9А класс", status="ACTIVE"):
-    return SimpleNamespace(id=chat_id, title=title, status=status)
+def чат(chat_id=ГРУППА, title="9А класс", status="ACTIVE", kind="CHAT"):
+    return SimpleNamespace(id=chat_id, title=title, status=status, type=kind, participants=[])
 
 
 class ФальшивыйMAX:
@@ -28,11 +28,13 @@ class ФальшивыйMAX:
         self._отказ = отказ
         self.покинуто = []
         self.настройки = []
+        self.спрошено = []
 
     async def fetch_chats(self):
         return self._чаты
 
     async def get_chat(self, chat_id):
+        self.спрошено.append(chat_id)
         return SimpleNamespace(id=chat_id, title="Чат", type="CHAT", participants=[])
 
     async def leave_group(self, chat_id):
@@ -164,6 +166,31 @@ class TestСписокЧатов:
         self.запросить(сообщение)
 
         assert "/write" in сообщение.сказано[0]
+
+    def test_не_переспрашивает_max_про_каждый_чат(self, мост):
+        """Всё нужное MAX прислал в самом списке — переспрашивать значит ждать на ровном месте.
+
+        Это запрос на чат. На полусотне школьных чатов ответ ползёт, а MAX вправе
+        начать придерживать такую очередь — и тогда список не придёт вовсе.
+        """
+        макс, _ = мост(ФальшивыйMAX([чат(chat_id=n, title=f"Чат {n}") for n in range(50)]))
+        сообщение = ФальшивоеСообщение()
+
+        self.запросить(сообщение)
+
+        assert макс.спрошено == []
+
+    def test_длинный_список_обрезает_по_знакам_а_не_по_строкам(self, мост):
+        """Сообщение сверх потолка Telegram не режет, а отвергает целиком — список пропал бы весь."""
+        длинные = [чат(chat_id=n, title="Родительский комитет " * 6) for n in range(60)]
+        мост(ФальшивыйMAX(длинные))
+        сообщение = ФальшивоеСообщение()
+
+        self.запросить(сообщение)
+
+        ответ = сообщение.сказано[0]
+        assert len(ответ) <= main.MESSAGE_LIMIT
+        assert "…и ещё" in ответ, "часть чатов не поместилась — об этом надо сказать"
 
 
 class TestВыходИзЧата:

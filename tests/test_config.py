@@ -2,7 +2,7 @@
 
 import pytest
 
-from bridge.config import flag, normalize_phone
+from bridge.config import SEEN_MARK, delete_mark, flag, normalize_phone
 
 
 @pytest.mark.parametrize(
@@ -45,3 +45,25 @@ def test_незаполненной_строки_достаточно(monkeypatc
     monkeypatch.delenv("ПРОБА", raising=False)
 
     assert flag("ПРОБА") is False
+
+
+class TestЗначокСтирания:
+    """Единственная настройка, которой можно испортить переписку, а не просто мост."""
+
+    def test_совпасть_с_отметкой_о_прочтении_не_даёт(self, monkeypatch):
+        """Иначе мост стирал бы сообщение ровно в тот миг, когда собеседник его прочитал."""
+        monkeypatch.setenv("TG_DELETE_MARK", SEEN_MARK)
+
+        with pytest.raises(SystemExit):
+            delete_mark()
+
+    def test_пустая_строка_значит_как_обычно(self, monkeypatch):
+        """Строку в .env заводят и оставляют пустой чаще, чем заполняют."""
+        monkeypatch.setenv("TG_DELETE_MARK", "  ")
+
+        assert delete_mark() == "💩"
+
+    def test_свой_значок_берёт_как_написано(self, monkeypatch):
+        monkeypatch.setenv("TG_DELETE_MARK", "🖕")
+
+        assert delete_mark() == "🖕"

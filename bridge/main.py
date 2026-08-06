@@ -37,7 +37,16 @@ from pymax.types.events.presence import PresenceEvent
 from pymax.types.events.reaction import ReactionUpdateEvent
 from pymax.types.events.typing import TypingEvent
 
-from .config import MAP_DB, SESSION_NAME, WORK_DIR, flag, normalize_phone, optional, require
+from .config import (
+    MAP_DB,
+    SEEN_MARK,
+    SESSION_NAME,
+    WORK_DIR,
+    delete_mark,
+    flag,
+    normalize_phone,
+    require,
+)
 from .storage import TopicMap
 from .version import PROJECT_URL, installed_version, newer, published_version
 
@@ -85,20 +94,12 @@ presence: dict[int, Presence] = {}
 # В переписке один на один имя над каждой строкой — лишний шум: в теме и так один человек.
 group_chats: dict[int, bool] = {}
 
-# Telegram берёт реакции только из своего списка, галочки в нём нет — «посмотрели» ближе всего.
-SEEN_MARK = "👀"
-
 # Об удалении сообщения Telegram боту не сообщает вовсе — такого события просто нет в его API.
 # Поэтому «убрать» приходится показывать тем, что мост увидеть может: реакцией. Этот значок
 # наверх не уходит и реакцией в MAX не становится — он значит «сотри везде». Годится любая
 # реакция, какую Telegram даёт поставить; 💩 хороша тем, что всерьёз её не отправишь.
-DELETE_MARK = optional("TG_DELETE_MARK", "💩")
-
-if DELETE_MARK == SEEN_MARK:
-    raise SystemExit(
-        f"В .env TG_DELETE_MARK={DELETE_MARK} — этим значком мост отмечает прочитанное. "
-        "Возьми любой другой, иначе прочитанное будет стираться само."
-    )
+# Сам значок и проверка на совпадение с отметкой о прочтении — в config.py, к настройкам.
+DELETE_MARK = delete_mark()
 
 # Свежее этого MAX ещё показывает человека онлайн.
 ONLINE_WINDOW = 90
@@ -212,8 +213,11 @@ CONTROL_EVENTS = {
 # Чат, из которого мы ушли или где нас выгнали, темой заводить незачем.
 GONE_STATUSES = {"LEFT", "REMOVED", "CLOSED"}
 
-# Список чатов должен влезть в одно сообщение Telegram: в нём потолок 4096 знаков.
-LIST_LIMIT = 60
+# Потолок одного сообщения в Telegram. Сверх него оно не обрезается, а не уходит вовсе.
+MESSAGE_LIMIT = 4096
+
+# Столько знаков Telegram даёт на название темы; длиннее он всё равно не примет.
+TITLE_LIMIT = 128
 
 # Из группы MAX обратно пускают только по приглашению — такое подтверждаем словом.
 YES_WORDS = {"да", "yes", "точно"}
@@ -273,8 +277,9 @@ def _peer_id(chat: Any) -> int | None:
     return next((uid for uid in chat.participants if uid != my_id), None)
 
 
-async def _topic_title(chat_id: int) -> str:
-    chat = await client.get_chat(chat_id)
+async def _topic_title(chat_id: int, chat: Any = None) -> str:
+    """Чат берём готовым, если он уже на руках: лишний запрос к MAX ничего не добавит."""
+    chat = chat if chat is not None else await client.get_chat(chat_id)
     if chat.title:
         return chat.title
 
@@ -282,10 +287,15 @@ async def _topic_title(chat_id: int) -> str:
     return await _sender_name(peer_id) if peer_id else f"Чат {chat_id}"
 
 
+def _is_group_chat(chat: Any) -> bool:
+    """Групповой чат или личка — по типу, который MAX кладёт в сам чат."""
+    return str(getattr(chat.type, "value", chat.type)) != "DIALOG"
+
+
 async def _is_group(chat_id: int) -> bool:
+    """То же самое, но когда на руках один номер чата. Спрашиваем MAX и запоминаем ответ."""
     if chat_id not in group_chats:
-        chat = await client.get_chat(chat_id)
-        group_chats[chat_id] = str(getattr(chat.type, "value", chat.type)) != "DIALOG"
+        group_chats[chat_id] = _is_group_chat(await client.get_chat(chat_id))
     return group_chats[chat_id]
 
 
@@ -332,7 +342,7 @@ async def _ensure_topic(chat_id: int, title: str | None = None) -> int | None:
 
     title = title or await _topic_title(chat_id)
     try:
-        topic = await bot.create_forum_topic(chat_id=GROUP_ID, name=title[:128])
+        topic = await bot.create_forum_topic(chat_id=GROUP_ID, name=title[:TITLE_LIMIT])
     except TelegramBadRequest as error:
         logger.error("не создать тему для чата MAX %s: %s", chat_id, error)
         return None
@@ -340,6 +350,40 @@ async def _ensure_topic(chat_id: int, title: str | None = None) -> int | None:
     topics.link(chat_id, topic.message_thread_id, title)
     logger.info("создана тема %s для чата MAX %s (%s)", topic.message_thread_id, chat_id, title)
     return topic.message_thread_id
+
+
+async def _post(method: str, topic_id: int | None, **payload: Any) -> TgMessage:
+    """Кладёт сообщение в тему и сам открывает её, если она закрыта.
+
+    Закрытая тема — не редкость. Её закрывает `/leave`, её можно закрыть руками,
+    прибираясь в списке, а потом в тот же чат снова придёт сообщение: тебя вернут
+    в школьную группу по новому приглашению или просто напишут в теме, которую ты
+    закрыл сгоряча. Связка чат↔тема при этом остаётся, и Telegram отвечает
+    TOPIC_CLOSED — раньше на этом всё и заканчивалось: исключение улетало в
+    библиотеку, в теме не появлялось ничего, и про сообщение можно было узнать,
+    только открыв MAX. Ровно то молчание, которого мост не должен допускать.
+
+    Открывать тему обратно правильнее, чем рвать связку при выходе: переписка
+    остаётся на месте, и вернувшись, ты продолжаешь старую тему, а не заводишь
+    рядом вторую такую же.
+    """
+    send = getattr(bot, method)
+    try:
+        return await send(GROUP_ID, message_thread_id=topic_id, **payload)
+    except TelegramBadRequest as error:
+        if topic_id is None or "TOPIC_CLOSED" not in str(error).upper():
+            raise
+
+    try:
+        await bot.reopen_forum_topic(GROUP_ID, topic_id)
+    except TelegramBadRequest as error:
+        # Права «Управление темами» может и не быть. Тогда в общий раздел: там сообщение
+        # увидят, а в закрытой теме — нет. Так же мост поступает, когда темы вовсе не вышло.
+        logger.error("тема %s закрыта, открыть не дали (%s) — пишу в общий раздел", topic_id, error)
+        return await send(GROUP_ID, message_thread_id=None, **payload)
+
+    logger.info("тема %s была закрыта — открыл заново", topic_id)
+    return await send(GROUP_ID, message_thread_id=topic_id, **payload)
 
 
 async def _source(chat_id: int, message: Message, attachment: Any, kind: str) -> tuple[str, str, str] | None:
@@ -470,20 +514,20 @@ async def _deliver(chat_id: int, message: Message) -> None:
     first: TgMessage | None = None
     for index, item in enumerate(media):
         method, argument = MEDIA_SENDERS[item.kind]
-        payload: dict[str, Any] = {argument: item.file, "message_thread_id": topic_id}
+        payload: dict[str, Any] = {argument: item.file}
         if index == 0 and reply is not None:
             payload["reply_parameters"] = reply
         if inline and index == 0:
             payload["caption"] = caption
-        posted = await getattr(bot, method)(GROUP_ID, **payload)
+        posted = await _post(method, topic_id, **payload)
         first = first or posted
         logger.info("переслали %s из чата MAX %s", item.kind, chat_id)
 
     if caption and not inline:
-        posted = await bot.send_message(
-            GROUP_ID,
-            caption,
-            message_thread_id=topic_id,
+        posted = await _post(
+            "send_message",
+            topic_id,
+            text=caption,
             reply_parameters=reply if first is None else None,
         )
         first = first or posted
@@ -586,7 +630,10 @@ async def on_max_presence(event: PresenceEvent, client: Client) -> None:
 async def on_max_typing(event: TypingEvent, client: Client) -> None:
     topic_id = topics.topic_for_chat(event.chat_id)
     if topic_id is not None:
-        await bot.send_chat_action(GROUP_ID, "typing", message_thread_id=topic_id)
+        # В закрытую тему «печатает…» не встанет. Открывать её ради этого не стоит:
+        # содержания в нём нет, а следом придёт само сообщение — вот оно тему и откроет.
+        with suppress(TelegramBadRequest):
+            await bot.send_chat_action(GROUP_ID, "typing", message_thread_id=topic_id)
 
 
 @client.on_message_read()
@@ -680,7 +727,7 @@ async def _greet_new_chat(chat: Chat) -> None:
     """Тему заводит только пришедшее сообщение — а в новой группе может долго стоять тишина."""
     if topics.topic_for_chat(chat.id) is not None:
         return
-    if str(getattr(chat.type, "value", chat.type)) == "DIALOG":
+    if not _is_group_chat(chat):
         return
     if str(chat.status).upper() in GONE_STATUSES:
         return
@@ -703,7 +750,7 @@ async def _greet_new_chat(chat: Chat) -> None:
     if chat.description:
         lines.append(html.escape(chat.description))
 
-    await bot.send_message(GROUP_ID, "\n".join(lines), message_thread_id=topic_id)
+    await _post("send_message", topic_id, text="\n".join(lines))
     logger.info("новый чат MAX %s (%s)", chat.id, title)
 
 
@@ -805,7 +852,7 @@ async def on_write_command(tg_message: TgMessage, command: CommandObject) -> Non
     topic_id = await _ensure_topic(chat_id, name)
     # Без подписи это эхо неотличимо от входящего, и выходит, будто собеседник написал
     # первым, хотя он ещё вообще ничего не написал.
-    await bot.send_message(GROUP_ID, f"<b>Ты:</b> {html.escape(text)}", message_thread_id=topic_id)
+    await _post("send_message", topic_id, text=f"<b>Ты:</b> {html.escape(text)}")
     where = "дальше пиши в его теме." if topic_id else NO_TOPIC
     await tg_message.reply(f"Отправлено «{html.escape(name)}», {where}")
 
@@ -824,11 +871,15 @@ async def on_chats_command(tg_message: TgMessage) -> None:
     for chat in chats:
         if str(chat.status).upper() in GONE_STATUSES:
             continue
+        # Всё нужное MAX уже прислал в самом списке. Спрашивать про каждый чат отдельно —
+        # это запрос на чат: на полусотне школьных чатов ответ ползёт, а MAX вправе начать
+        # придерживать такую очередь. Заодно запоминаем тип: он же понадобится при отправке.
+        group_chats[chat.id] = _is_group_chat(chat)
         topic_id = topics.topic_for_chat(chat.id)
-        title = chat.title or topics.title_for_chat(chat.id) or await _topic_title(chat.id)
-        kind = "" if await _is_group(chat.id) else "личка, "
+        title = chat.title or topics.title_for_chat(chat.id) or await _topic_title(chat.id, chat)
+        kind = "" if group_chats[chat.id] else "личка, "
         where = "тема есть" if topic_id else "темы ещё нет — заведётся с первым сообщением"
-        lines.append(f"• <b>{html.escape(title)}</b> — {kind}{where}")
+        lines.append(f"• <b>{html.escape(title[:TITLE_LIMIT])}</b> — {kind}{where}")
 
     if not lines:
         await tg_message.reply(
@@ -837,8 +888,17 @@ async def on_chats_command(tg_message: TgMessage) -> None:
         )
         return
 
-    # Телеграм не примет сообщение длиннее 4096 знаков, а чатов может быть много.
-    head = lines[:LIST_LIMIT]
+    # Считаем знаки, а не строки. Сообщение сверх потолка Telegram не обрезает, а отвергает
+    # целиком: полсотни длинных названий — и вместо списка не приходит ничего. Место под
+    # заголовок и хвост «…и ещё N» держим заранее — дописывать их в полное сообщение поздно.
+    head: list[str] = []
+    room = MESSAGE_LIMIT - len(f"<b>Чаты в MAX: {len(lines)}</b>") - len("\n<i>…и ещё 000</i>")
+    for line in lines:
+        if len(line) + 1 > room:
+            break
+        room -= len(line) + 1
+        head.append(line)
+
     tail = f"\n<i>…и ещё {len(lines) - len(head)}</i>" if len(lines) > len(head) else ""
     await tg_message.reply(f"<b>Чаты в MAX: {len(lines)}</b>\n" + "\n".join(head) + tail)
 
