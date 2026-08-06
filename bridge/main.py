@@ -116,6 +116,7 @@ HELP = (
     "<code>/join ссылка</code> — вступить в чат по приглашению\n"
     "<code>/status</code> — внутри темы: кто это и когда был в сети\n\n"
     "Ответь на сообщение — ответ уйдёт в MAX тоже ответом.\n"
+    "Исправил своё сообщение — исправится и у собеседника в MAX.\n"
     "Реакция под сообщением уходит в MAX и приходит обратно.\n"
     f"{SEEN_MARK} под твоим сообщением — собеседник его прочитал.\n"
     f"{DELETE_MARK} под сообщением — стереть его и здесь, и в MAX у всех.\n"
@@ -848,6 +849,43 @@ async def on_tg_message(tg_message: TgMessage) -> None:
     if sent is not None:
         topics.pair_messages(chat_id, sent.id, tg_message.message_id)
     topics.remember_outgoing(chat_id, tg_message.message_id)
+
+
+@dp.edited_message(F.chat.id == GROUP_ID, F.message_thread_id.is_not(None))
+async def on_tg_edit(tg_message: TgMessage) -> None:
+    """Исправил опечатку в теме — исправляем и у собеседника в MAX.
+
+    Правки Telegram присылает отдельным событием, не сообщением, — поэтому и хендлер
+    отдельный. Молчим только при удаче: правка и так видна в теме пометкой «изменено».
+    """
+    pair = topics.max_message_for(tg_message.message_id)
+    if pair is None:
+        # Сообщение не проходило через мост — править в MAX нечего.
+        return
+
+    chat_id, max_message_id = pair
+    if not tg_message.text:
+        # У сообщения с файлом Telegram правит подпись, а MAX при правке ждёт список
+        # вложений заново: пустой список он поймёт как «вложений больше нет» и снесёт
+        # сам файл. Ради подписи терять картинку — плохая сделка.
+        await tg_message.reply(
+            "<b>Правка не ушла.</b> Подпись к файлу мост не правит: MAX при правке "
+            f"потерял бы сам файл. Поставь {DELETE_MARK} и отправь заново."
+        )
+        return
+
+    await max_ready.wait()
+    try:
+        await client.edit_message(chat_id, int(max_message_id), text=tg_message.text)
+    except (ApiError, ValueError, TypeError) as error:
+        # Ты видишь в теме «изменено» и уверен, что собеседник читает исправленное.
+        logger.error("MAX не принял правку сообщения %s: %s", max_message_id, error)
+        await tg_message.reply(
+            f"<b>Правка не ушла в MAX.</b> У собеседника осталось прежнее. "
+            f"MAX отказал: {html.escape(str(error))}"
+        )
+        return
+    logger.info("правка уехала в MAX: чат %s, сообщение %s", chat_id, max_message_id)
 
 
 def _why_telegram_refused(error: TelegramBadRequest) -> str:
