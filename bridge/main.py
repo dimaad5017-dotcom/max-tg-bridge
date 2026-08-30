@@ -20,6 +20,7 @@ from aiogram.types import (
     BotCommand,
     BotCommandScopeChat,
     BufferedInputFile,
+    ErrorEvent,
     MessageReactionUpdated,
     ReactionTypeEmoji,
     ReplyParameters,
@@ -1323,6 +1324,34 @@ async def on_tg_outside_topic(tg_message: TgMessage) -> None:
         "отвечает на команды.\nПиши внутри темы того, кому адресовано. Нет темы — "
         "заведи её: <code>/write +7 999 123-45-67 привет</code>."
     )
+
+
+@dp.errors()
+async def on_tg_error(event: ErrorEvent) -> None:
+    """Последняя сеть под всем, что мост делает по команде из Telegram.
+
+    Отправку в MAX мост прикрывает и сам — «MAX не принял ...». Но ловит он там только
+    отказ MAX, а сорваться может что угодно ещё: сеть, неожиданный ответ, ошибка в самом
+    мосте. Тогда aiogram запишет её в лог и замолчит — а человек останется уверен, что
+    сообщение ушло. В эту сторону молчание опаснее всего: про недоставленное входящее
+    хотя бы видно, что его нет, а тут ты просто ждёшь ответа, которого не будет, потому
+    что твоего сообщения никто не получил.
+
+    Отвечаем прямо туда, откуда пришли: в теме собеседника это видно рядом с самим
+    сообщением, и сразу понятно, какое именно не ушло.
+    """
+    logger.error("сорвалось на сообщении из Telegram", exc_info=event.exception)
+    message = event.update.message or event.update.edited_message
+    if message is None:
+        return
+
+    # Если и ответить не вышло, остаётся лог: больше сказать уже нечем.
+    with suppress(Exception):
+        await message.reply(
+            "<b>Не отправлено.</b> Мост споткнулся: "
+            f"<i>{html.escape(str(event.exception) or type(event.exception).__name__)}</i>\n"
+            "Попробуй ещё раз. Если повторится — загляни в окно моста, там записано подробно."
+        )
 
 
 @dp.edited_message(F.chat.id == GROUP_ID, F.message_thread_id.is_not(None))

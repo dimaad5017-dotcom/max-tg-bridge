@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from aiogram.filters import Command
+from aiogram.types import ErrorEvent
 from pymax.exceptions import ApiError
 
 from bridge import main
@@ -418,3 +419,58 @@ class TestНезнакомаяКоманда:
         макс, _ = self.написать(мост, "/дом")
 
         assert макс.отправлено == [(ГРУППА, "/дом")]
+
+
+class TestСбойВОбработчике:
+    """Отказ MAX мост объясняет сам. А сорваться может и что-то другое.
+
+    Тогда aiogram запишет беду в лог и замолчит, а человек останется уверен, что
+    сообщение ушло. В эту сторону молчание опаснее всего: про недоставленное входящее
+    хотя бы видно, что его нет, а тут просто ждёшь ответа, которого не будет, — потому
+    что твоего сообщения никто не получил.
+    """
+
+    def сорвать(self, беда, письмо=None):
+        письмо = письмо or ФальшивоеСообщение()
+        # model_construct — нарочно мимо проверок: настоящий Update требует полей,
+        # которые к делу не относятся, а обработчику нужны только эти два.
+        событие = ErrorEvent.model_construct(
+            update=SimpleNamespace(message=письмо, edited_message=None), exception=беда
+        )
+        asyncio.run(main.on_tg_error(событие))
+        return письмо
+
+    def test_отвечает_что_не_отправлено(self):
+        письмо = self.сорвать(RuntimeError("сеть отвалилась"))
+
+        assert письмо.сказано and "Не отправлено" in письмо.сказано[0]
+
+    def test_называет_причину(self):
+        """Без причины непонятно, повторить попытку или чинить мост."""
+        письмо = self.сорвать(RuntimeError("сеть отвалилась"))
+
+        assert "сеть отвалилась" in письмо.сказано[0]
+
+    def test_беду_без_текста_называет_хотя_бы_видом(self):
+        """У `TimeoutError()` текста нет — «мост споткнулся: » ни о чём не говорит."""
+        письмо = self.сорвать(TimeoutError())
+
+        assert "TimeoutError" in письмо.сказано[0]
+
+    def test_без_сообщения_не_падает(self):
+        """Сорваться может и не на сообщении — на реакции, например. Отвечать некуда."""
+        событие = ErrorEvent.model_construct(
+            update=SimpleNamespace(message=None, edited_message=None),
+            exception=RuntimeError("беда"),
+        )
+
+        asyncio.run(main.on_tg_error(событие))
+
+    def test_если_и_ответить_не_вышло_мост_живёт(self):
+        """Иначе беда внутри сети под бедой обрушит и сам мост."""
+
+        class Немой(ФальшивоеСообщение):
+            async def reply(self, text, **прочее):
+                raise RuntimeError("Telegram лежит")
+
+        self.сорвать(RuntimeError("беда"), Немой())
