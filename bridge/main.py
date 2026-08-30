@@ -14,7 +14,7 @@ import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ContentType, ParseMode
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     BotCommand,
@@ -192,6 +192,12 @@ NEW_CHAT_SCAN = 300
 # Двадцать секунд — с запасом на обычный вход и мало для человека, который смотрит в
 # экран. Ошибиться в короткую сторону не страшно: скажем «повтори», и он повторит.
 MAX_WAIT = 20
+# Пауза между попытками достучаться до Telegram, пока сети ещё нет.
+#
+# Пятнадцать секунд — чтобы не молотить впустую и не проспать: обычный Wi-Fi
+# поднимается за это время, а если он поднимется на минуту позже, мост потеряет
+# на ожидании те же пятнадцать секунд, а не рабочий день.
+NET_RETRY = 15
 
 NO_TOPIC = "но тема не создалась — дай боту право «Управление темами», пока пишу сюда, в General."
 
@@ -1911,13 +1917,49 @@ async def _tell_about_update() -> None:
         )
 
 
+async def _greet_telegram() -> None:
+    """Достучаться до Telegram, а если сети ещё нет — дождаться её, а не умереть.
+
+    Мост теперь поднимается вместе с Windows, и к этой секунде Wi-Fi обычно ещё не
+    подключился: вход в систему быстрее, чем сеть. Без сети первый же запрос падает
+    примерно за двенадцать секунд — то есть не «долго висит», а именно падает.
+
+    Дальше срабатывала защита от кривых настроек: запуск поднимает упавший мост, но
+    трижды подряд умерший меньше чем за полминуты он считает безнадёжным и перестаёт
+    поднимать. Три попытки с паузами — это минута. Wi-Fi, поднявшийся на второй минуте,
+    оставлял мост выключенным до вечера. А поскольку из автозапуска окно открывается
+    свёрнутым и при выходе закрывается совсем, на экране не оставалось даже следа.
+
+    Ждать здесь безопасно: обе половины и так умеют переподключаться сами, и всё
+    ожидание видно в окне строкой «сети нет». Плохой токен или чужая группа — другое
+    дело: это не пройдёт и через час, поэтому такую беду пропускаем наверх, чтобы
+    мост сдался громко и со ссылкой на разбор частых ошибок.
+    """
+    since = time.monotonic()
+    attempt = 0
+    while True:
+        try:
+            # Заодно проверка, что токен рабочий и бот в группе: команды ставятся ей.
+            await bot.set_my_commands(COMMANDS, scope=BotCommandScopeChat(chat_id=GROUP_ID))
+            break
+        except TelegramNetworkError as error:
+            # Первый раз — сразу, дальше раз в минуту: журнал не должен состоять из этой строки.
+            if attempt % 4 == 0:
+                logger.warning("сети нет (%s) — жду и пробую снова", error)
+            attempt += 1
+            await asyncio.sleep(NET_RETRY)
+
+    if attempt:
+        logger.info("сеть появилась через %.0f секунд ожидания", time.monotonic() - since)
+
+
 async def main() -> None:
     # До входа, чтобы и первый запрос ушёл с честным признаком: применяется он
     # при следующем login или ping, а не мгновенно.
     client.set_presence(online=SHOW_ONLINE)
     logger.info("в MAX буду показываться %s", "в сети" if SHOW_ONLINE else "не в сети")
 
-    await bot.set_my_commands(COMMANDS, scope=BotCommandScopeChat(chat_id=GROUP_ID))
+    await _greet_telegram()
     # Первая строка, по которой видно, что токен рабочий и группа на месте: без неё
     # окно молчит до первого сообщения, и непонятно, живой мост или нет.
     logger.info("Telegram на связи, слушаю группу %s", GROUP_ID)

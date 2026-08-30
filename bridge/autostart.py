@@ -53,24 +53,34 @@ def startup_dir() -> Path | None:
     return Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
 
 
+LAUNCHER = "4-запустить-мост.cmd"
+
+
 def script(project: Path) -> str:
-    """Тот самый командный файл. Пути полные: автозагрузка стартует не из папки моста."""
-    python = project / ".venv" / "Scripts" / "python.exe"
+    """Тот самый командный файл. Пути полные: автозагрузка стартует не из папки моста.
+
+    Запускаем не питон напрямую, а тот же файл, по которому щёлкают руками. Разница
+    в одной строке в его конце — `pause`. Без неё окно моста, который сдался, просто
+    исчезает: свёрнутое окно закрылось само, и о том, что весь день моста не было,
+    узнать неоткуда. С ней сдавшийся мост остаётся в панели задач вместе с причиной.
+    """
+    launcher = project / LAUNCHER
     return (
         "@echo off\r\n"
         f"{MARK}\r\n"
         "chcp 866 >nul\r\n"
         f'cd /d "{project}"\r\n'
         "\r\n"
-        f'if not exist "{python}" (\r\n'
-        "  echo Мост не установлен: запусти 1-установить.cmd.\r\n"
+        f'if not exist "{launcher}" (\r\n'
+        "  echo Мост не найден: похоже, папку переместили или удалили.\r\n"
+        "  echo Запусти 5-автозапуск.cmd из новой папки, чтобы поправить.\r\n"
         "  echo.\r\n"
         "  pause\r\n"
         "  exit /b 1\r\n"
         ")\r\n"
         "\r\n"
         "rem Свёрнутым: мост нужен работающим, а не заслоняющим экран при каждом входе.\r\n"
-        f'start "Мост MAX - Telegram" /min "{python}" -m bridge.run\r\n'
+        f'start "Мост MAX - Telegram" /min "{launcher}"\r\n'
     )
 
 
@@ -91,6 +101,21 @@ def foreign(folder: Path) -> bool:
     """Файл с таким именем есть, но не наш. Трогать нельзя."""
     where = folder / NAME
     return where.exists() and not ours(where)
+
+
+def stale(folder: Path, project: Path = PROJECT) -> bool:
+    """Файл наш, но не тот: мост переехал в другую папку или сам с тех пор изменился.
+
+    Автозагрузка запомнила полный путь один раз и о переезде не узнает. Молча не
+    запустится — а это ровно то, ради чего автозапуск и включали.
+    """
+    where = folder / NAME
+    if not ours(where):
+        return False
+    try:
+        return where.read_bytes() != script(project).encode(console_encoding())
+    except OSError:
+        return False
 
 
 def enable(folder: Path, project: Path = PROJECT) -> bool:
@@ -125,13 +150,28 @@ def main() -> int:
         return 1
 
     now_on = enabled(folder)
-    print("Автозапуск сейчас:", "включён" if now_on else "выключен")
-    print()
-    print("Выключить?" if now_on else "Включить?")
+    outdated = now_on and stale(folder)
+
+    if outdated:
+        print("Автозапуск включён, но записан по-старому: мост с тех пор обновился")
+        print("или папку с ним перенесли. При входе в Windows он может не запуститься.")
+        print()
+        print("Обновить?")
+    else:
+        print("Автозапуск сейчас:", "включён" if now_on else "выключен")
+        print()
+        print("Выключить?" if now_on else "Включить?")
     answer = input("Введи «д» и нажми Enter (или просто Enter, чтобы ничего не менять): ")
 
     if answer.strip().lower() not in {"д", "да", "y", "yes"}:
         print("Ничего не изменил.")
+        return 0
+
+    if outdated:
+        enable(folder)
+        print()
+        print("Обновил. Запись в автозагрузке снова верная.")
+        print("Чтобы выключить автозапуск совсем, запусти этот файл ещё раз.")
         return 0
 
     if now_on:
