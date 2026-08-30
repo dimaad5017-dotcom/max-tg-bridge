@@ -663,6 +663,31 @@ async def _deliver(chat_id: int, message: Message) -> None:
         logger.error("не отметить прочтение в MAX чата %s: %s", chat_id, error)
 
 
+async def _try_deliver(chat_id: int, message: Message) -> None:
+    """Доставить и, если не вышло, сказать об этом словами. Промолчать нельзя.
+
+    Про то, что мост умеет не доставить, он говорит и так: слишком большое видео, файл,
+    который Telegram не отдал. Но это заранее известные беды, а бывают неизвестные —
+    длинное сообщение было ровно такой, пока не починили. Любая из них раньше кончалась
+    молчанием: отказ уходил в лог, а человек не узнавал даже, что сообщение было.
+
+    Молчание тут — худший исход из возможных. В MAX ты не заходишь, значит непрочитанное
+    там так и останется. Пусть лучше в теме будет строка «не доставлено» с причиной: по
+    ней видно, что сообщение есть, и понятно, куда идти смотреть.
+    """
+    try:
+        await _deliver(chat_id, message)
+    except Exception as error:
+        logger.exception("не доставить сообщение из чата MAX %s", chat_id)
+        # Здесь уже нечем починить: если и эта отправка не пройдёт, остаётся только лог.
+        with suppress(Exception):
+            await _post(
+                "send_message",
+                topics.topic_for_chat(chat_id),
+                text=_lost("сообщение", html.escape(str(error) or type(error).__name__)),
+            )
+
+
 async def _catch_up(client: Client) -> None:
     """MAX отдаёт сообщения живым потоком, поэтому написанное при выключенном мосте берём историей."""
     my_id = client.me.contact.id if client.me else None
@@ -695,7 +720,9 @@ async def _catch_up(client: Client) -> None:
             if message.sender != my_id and (delivered is None or message.time > delivered)
         ]
         for message in missed:
-            await _deliver(chat.id, message)
+            # По одному: на одном спотыкающемся сообщении догонялка раньше обрывалась
+            # целиком — вместе со всеми чатами, до которых ещё не дошла очередь.
+            await _try_deliver(chat.id, message)
         if missed:
             total += len(missed)
             logger.info("догнали %s пропущенных из чата MAX %s", len(missed), chat.id)
@@ -916,7 +943,7 @@ async def on_max_message(message: Message, client: Client) -> None:
     if message.chat_id is None or message.sender == my_id:
         return
 
-    await _deliver(message.chat_id, message)
+    await _try_deliver(message.chat_id, message)
 
 
 @dp.message(F.chat.id == GROUP_ID, Command("help", "start"))
