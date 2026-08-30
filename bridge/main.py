@@ -378,7 +378,86 @@ async def _ensure_topic(chat_id: int, title: str | None = None) -> int | None:
     return topic.message_thread_id
 
 
+def _safe_edge(piece: str) -> int:
+    """Где резать строку, чтобы не остаться с половиной тега или половиной `&amp;`.
+
+    Половина `<b` или `&am` — это уже не разметка, и Telegram отвергает такой кусок целиком.
+    Поэтому отступаем к началу незакрытого куска. Если он начался с самого края (такого в
+    жизни не бывает — тег длиной в 4096 знаков), режем как есть: сломанная разметка лучше,
+    чем вечный цикл, в котором мост перестанет отвечать вообще.
+    """
+    edges = [len(piece)]
+    for opener, closer in (("<", ">"), ("&", ";")):
+        start = piece.rfind(opener)
+        if start > 0 and closer not in piece[start:]:
+            edges.append(start)
+    return min(edges)
+
+
+def _chunks(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
+    """Режет длинный текст на куски, которые Telegram примет.
+
+    Сообщение длиннее 4096 знаков Telegram не обрезает, а отвергает целиком. В школьных
+    чатах такие бывают: что принести на выезд, расписание на четверть, объявление на две
+    страницы. Раньше оно не доезжало никак — ни в тему, ни строкой «не доставлено»:
+    отказ улетал в библиотеку, и о сообщении можно было узнать, только открыв MAX.
+
+    Режем по строкам: внутри строки теги `<b>` и `<i>` уже закрыты, и разрыв их не заденет.
+    Строку длиннее предела режем по живому, но отступив от края, — см. `_safe_edge`.
+
+    Держится это на том, что теги мост ставит только в короткие строки, которые сочиняет
+    сам («<b>Имя</b>», «<i>не доставлено</i>»), а длинным бывает лишь текст человека — но он
+    проходит через `html.escape`, и тегов в нём уже нет. Появится длинная строка с тегами —
+    половина `<b>` уедет во вторую часть, и Telegram отвергнет её как сломанную разметку.
+    """
+    parts: list[str] = []
+    rest = text
+    while len(rest) > limit:
+        piece = rest[:limit]
+        edge = piece.rfind("\n")
+        if edge <= 0:
+            edge = _safe_edge(piece)
+        parts.append(rest[:edge])
+        rest = rest[edge + 1 :] if rest[edge] == "\n" else rest[edge:]
+    parts.append(rest)
+    # Пустые куски дают подряд идущие переводы строки на стыке — слать их незачем.
+    return [part for part in parts if part] or [text[:limit]]
+
+
+TOO_LONG = "\n<i>…дальше не влезло — целиком видно только в MAX</i>"
+
+
+def _fit(text: str, limit: int) -> str:
+    """Обрезает по месту — но не молча: без пометки человек решит, что так и было написано."""
+    if len(text) <= limit:
+        return text
+    return _chunks(text, limit - len(TOO_LONG))[0] + TOO_LONG
+
+
 async def _post(method: str, topic_id: int | None, **payload: Any) -> TgMessage:
+    """Отправляет сообщение в тему, разложив его на части, если оно длиннее предела Telegram.
+
+    Разложить умеет только сам `_post`, и это нарочно: обещание «ничего не теряем» должно
+    жить в одном месте. Разбросай его по вызывающим — и однажды кто-то забудет, а узнается
+    об этом опять из MAX. Наверх возвращаем первую часть: по ней мост потом ищет сообщение,
+    чтобы правку показать на месте и ответ процитировать в нужную точку.
+    """
+    text = payload.get("text")
+    parts = _chunks(text) if isinstance(text, str) else [""]
+    if len(parts) == 1:
+        return await _post_one(method, topic_id, **payload)
+
+    logger.info("сообщение длиннее предела Telegram — разложил на %s части", len(parts))
+    first = await _post_one(method, topic_id, **{**payload, "text": parts[0]})
+    for part in parts[1:]:
+        # Цитату вешаем только на первую часть: остальные продолжают её, а не отвечают снова.
+        tail = {**payload, "text": part}
+        tail.pop("reply_parameters", None)
+        await _post_one(method, topic_id, **tail)
+    return first
+
+
+async def _post_one(method: str, topic_id: int | None, **payload: Any) -> TgMessage:
     """Кладёт сообщение в тему и сам открывает её, если она закрыта.
 
     Закрытая тема — не редкость. Её закрывает `/leave`, её можно закрыть руками,
@@ -736,14 +815,16 @@ async def on_max_edit(message: Message, client: Client) -> None:
         return
 
     text, _ = await _compose(message.chat_id, message)
-    text = f"{text}\n<i>(исправлено)</i>"
+    # Правку показываем на месте старого сообщения, поэтому разложить её на несколько,
+    # как обычную длинную, нельзя: сообщение здесь одно. Тогда обрезаем — но с пометкой.
+    text = _fit(f"{text}\n<i>(исправлено)</i>", MESSAGE_LIMIT)
     try:
         await bot.edit_message_text(text, chat_id=GROUP_ID, message_id=tg_message_id)
     except TelegramBadRequest:
         # У сообщения с файлом правится не текст, а подпись — Telegram считает это разными вещами.
         with suppress(TelegramBadRequest):
             await bot.edit_message_caption(
-                chat_id=GROUP_ID, message_id=tg_message_id, caption=text[:CAPTION_LIMIT]
+                chat_id=GROUP_ID, message_id=tg_message_id, caption=_fit(text, CAPTION_LIMIT)
             )
 
 
