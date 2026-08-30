@@ -234,6 +234,15 @@ MESSAGE_LIMIT = 4096
 # Столько знаков Telegram даёт на название темы; длиннее он всё равно не примет.
 TITLE_LIMIT = 128
 
+# Метки, которыми в групповом чате различают людей. Цвет — главный признак, форма —
+# запасной: цветов всего семь, а в школьной группе бывает и два десятка человек.
+# Чёрного и белого тут нарочно нет: один пропадает в тёмной теме, другой в светлой.
+NAME_MARKS = (
+    "🔴", "🟠", "🟡", "🟢", "🔵", "🟣", "🟤",
+    "🟥", "🟧", "🟨", "🟩", "🟦", "🟪", "🟫",
+    "❤️", "🧡", "💛", "💚", "💙", "💜", "🤎",
+)  # fmt: skip
+
 # Из группы MAX обратно пускают только по приглашению — такое подтверждаем словом.
 YES_WORDS = {"да", "yes", "точно"}
 
@@ -297,6 +306,30 @@ async def _sender_name(user_id: int | None) -> str:
     if user_id is None:
         return "неизвестный"
     return _display_name(await client.get_user(user_id), user_id)
+
+
+def _mark(user_id: int | None) -> str:
+    """Цветная метка человека — чтобы в групповом чате было видно, где чьё сообщение.
+
+    Все сообщения приходят от одного бота, поэтому ни своей аватарки, ни своего цвета
+    имени у человека из MAX быть не может: Telegram рисует отправителя по аккаунту, а
+    аккаунт тут один на всех. Покрасить само имя тоже нечем — в разметке Telegram есть
+    жирный, курсив и ссылка, но цвета нет. Остаётся знак перед именем, и он единственный,
+    кто в этой ленте одинаковых жирных строк держит разговор на несколько голосов.
+
+    Метку выбираем по номеру в MAX, а не по имени: имя человек меняет, и цвет прыгал бы
+    вместе с ним — а номер у аккаунта один навсегда, значит и цвет тот же и завтра, и
+    после перезапуска моста. Хранить ничего не нужно, это чистый расчёт.
+
+    Меток два десятка, и в большом чате двое рано или поздно получат одну — это не беда:
+    метка помогает разделить ленту на голоса, а кто именно сказал, написано рядом именем.
+    Раздавать метки без повторов можно было бы, запомнив их по чату, но тогда мосту
+    пришлось бы вести ещё одну табличку ради того, что и так видно из имени.
+    """
+    if user_id is None:
+        # Отправителя не назвали — тогда и метка никакая: серый кружок, ничей цвет.
+        return "🔘"
+    return NAME_MARKS[user_id % len(NAME_MARKS)]
 
 
 def _peer_id(chat: Any) -> int | None:
@@ -369,7 +402,7 @@ async def _ensure_topic(chat_id: int, title: str | None = None) -> int | None:
 
     title = title or await _topic_title(chat_id)
     try:
-        topic = await bot.create_forum_topic(chat_id=GROUP_ID, name=title[:TITLE_LIMIT])
+        topic = await bot.create_forum_topic(chat_id=GROUP_ID, name=title[: _cut(title, TITLE_LIMIT)])
     except TelegramBadRequest as error:
         logger.error("не создать тему для чата MAX %s: %s", chat_id, error)
         return None
@@ -377,6 +410,35 @@ async def _ensure_topic(chat_id: int, title: str | None = None) -> int | None:
     topics.link(chat_id, topic.message_thread_id, title)
     logger.info("создана тема %s для чата MAX %s (%s)", topic.message_thread_id, chat_id, title)
     return topic.message_thread_id
+
+
+def _tg_len(text: str) -> int:
+    """Длина по счёту Telegram, а не по счёту Python.
+
+    Telegram меряет сообщение в единицах UTF-16 и всё, что не поместилось в основную
+    таблицу Unicode, считает за два знака: 🔴, 👶, 🧒. Python считает такое за один.
+    Разница вылезает ровно там, где эмодзи много, — а это школьные чаты: «11М Дети
+    👶👶👶🧒🧒🧒». Померив по-своему, мост отправил бы кусок, который Telegram отвергнет,
+    и длинное сообщение снова пропало бы — с той же тишиной, ради которой всё затевалось.
+    """
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _cut(text: str, limit: int) -> int:
+    """Сколько знаков Python влезает в `limit` единиц Telegram.
+
+    Режем всегда по границе знака, поэтому пара суррогатов не разъезжается пополам:
+    в Python эмодзи — один неделимый символ, даже если Telegram считает его за два.
+    """
+    if _tg_len(text) <= limit:
+        return len(text)
+
+    used = 0
+    for index, char in enumerate(text):
+        used += 2 if ord(char) > 0xFFFF else 1
+        if used > limit:
+            return index
+    return len(text)
 
 
 def _safe_edge(piece: str) -> int:
@@ -413,8 +475,8 @@ def _chunks(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
     """
     parts: list[str] = []
     rest = text
-    while len(rest) > limit:
-        piece = rest[:limit]
+    while _tg_len(rest) > limit:
+        piece = rest[: _cut(rest, limit)]
         edge = piece.rfind("\n")
         if edge <= 0:
             edge = _safe_edge(piece)
@@ -422,7 +484,7 @@ def _chunks(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
         rest = rest[edge + 1 :] if rest[edge] == "\n" else rest[edge:]
     parts.append(rest)
     # Пустые куски дают подряд идущие переводы строки на стыке — слать их незачем.
-    return [part for part in parts if part] or [text[:limit]]
+    return [part for part in parts if part] or [text[: _cut(text, limit)]]
 
 
 TOO_LONG = "\n<i>…дальше не влезло — целиком видно только в MAX</i>"
@@ -430,9 +492,9 @@ TOO_LONG = "\n<i>…дальше не влезло — целиком видно
 
 def _fit(text: str, limit: int) -> str:
     """Обрезает по месту — но не молча: без пометки человек решит, что так и было написано."""
-    if len(text) <= limit:
+    if _tg_len(text) <= limit:
         return text
-    return _chunks(text, limit - len(TOO_LONG))[0] + TOO_LONG
+    return _chunks(text, limit - _tg_len(TOO_LONG))[0] + TOO_LONG
 
 
 async def _post(method: str, topic_id: int | None, **payload: Any) -> TgMessage:
@@ -565,7 +627,8 @@ async def _compose(chat_id: int, message: Message) -> tuple[str, list[Media]]:
     """Текст сообщения и то, что удалось выкачать; про остальное честно пишем в тексте."""
     lines: list[str] = []
     if await _is_group(chat_id):
-        lines.append(f"<b>{html.escape(await _sender_name(message.sender))}</b>")
+        name = html.escape(await _sender_name(message.sender))
+        lines.append(f"{_mark(message.sender)} <b>{name}</b>")
     if message.text:
         lines.append(html.escape(message.text))
 
@@ -630,7 +693,9 @@ async def _deliver(chat_id: int, message: Message) -> None:
     reply = _quoted(chat_id, message)
 
     # Подпись вешаем на первый файл; стикер подписи не принимает, длинный текст в неё не влезет.
-    inline = bool(caption) and bool(media) and media[0].kind != "sticker" and len(caption) <= CAPTION_LIMIT
+    inline = (
+        bool(caption) and bool(media) and media[0].kind != "sticker" and _tg_len(caption) <= CAPTION_LIMIT
+    )
     first: TgMessage | None = None
     for index, item in enumerate(media):
         method, argument = MEDIA_SENDERS[item.kind]
@@ -918,7 +983,9 @@ async def _rename_topic(chat: Chat) -> None:
         return
 
     try:
-        await bot.edit_forum_topic(chat_id=GROUP_ID, message_thread_id=topic_id, name=title[:TITLE_LIMIT])
+        await bot.edit_forum_topic(
+            chat_id=GROUP_ID, message_thread_id=topic_id, name=title[: _cut(title, TITLE_LIMIT)]
+        )
     except TelegramBadRequest as error:
         # Без права «Управление темами» переименовать нельзя. Не беда: про переименование
         # человек всё равно узнает — строкой в самой теме, её пишет `_control_line`.
@@ -1090,7 +1157,7 @@ async def on_chats_command(tg_message: TgMessage) -> None:
         title = chat.title or topics.title_for_chat(chat.id) or await _topic_title(chat.id, chat)
         kind = "" if group_chats[chat.id] else "личка, "
         where = "тема есть" if topic_id else "темы ещё нет — заведётся с первым сообщением"
-        lines.append(f"• <b>{html.escape(title[:TITLE_LIMIT])}</b> — {kind}{where}")
+        lines.append(f"• <b>{html.escape(title[: _cut(title, TITLE_LIMIT)])}</b> — {kind}{where}")
 
     if not lines:
         await tg_message.reply(
@@ -1103,11 +1170,11 @@ async def on_chats_command(tg_message: TgMessage) -> None:
     # целиком: полсотни длинных названий — и вместо списка не приходит ничего. Место под
     # заголовок и хвост «…и ещё N» держим заранее — дописывать их в полное сообщение поздно.
     head: list[str] = []
-    room = MESSAGE_LIMIT - len(f"<b>Чаты в MAX: {len(lines)}</b>") - len("\n<i>…и ещё 000</i>")
+    room = MESSAGE_LIMIT - _tg_len(f"<b>Чаты в MAX: {len(lines)}</b>") - _tg_len("\n<i>…и ещё 000</i>")
     for line in lines:
-        if len(line) + 1 > room:
+        if _tg_len(line) + 1 > room:
             break
-        room -= len(line) + 1
+        room -= _tg_len(line) + 1
         head.append(line)
 
     tail = f"\n<i>…и ещё {len(lines) - len(head)}</i>" if len(lines) > len(head) else ""
