@@ -1,10 +1,12 @@
 """Мелочи, из-за которых сообщение выглядит не так, как человек ожидал."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
-from bridge.main import _call_line, _display_name, _lost, _moment, _split_phone
+from bridge import main
+from bridge.main import _call_line, _control_line, _display_name, _lost, _moment, _split_phone
 
 
 def имя(first=None, last=None, name=None):
@@ -95,3 +97,44 @@ class TestНедоставленное:
 
     def test_незнакомое_вложение_не_ломает_строку(self):
         assert _lost("НЕЧТО", "причина").startswith("<b>Не доставлено:</b> нечто — причина")
+
+
+class TestСлужебноеСобытиеЧата:
+    """«Кого-то добавили», «чат переименовали» — в школьных чатах этого больше, чем разговоров.
+
+    Коды событий MAX нигде не описаны, и в библиотеке их тоже нет. Значит, однажды придёт
+    незнакомый — и человек должен увидеть событие чата, а не обломок кода в теме.
+    """
+
+    def строка(self, monkeypatch, event, **поля):
+        async def имя(user_id):
+            return {7: "поля", 8: "HLEB"}[user_id]
+
+        monkeypatch.setattr(main, "_sender_name", имя)
+        return asyncio.run(_control_line(SimpleNamespace(event=event, **поля)))
+
+    def test_вступление_по_ссылке_переводит(self, monkeypatch):
+        """Живой школьный чат прислал `joinByLink`, и в теме появился голый код."""
+        assert self.строка(monkeypatch, "joinByLink", user_ids=[7]) == "<i>вступил по ссылке: поля</i>"
+
+    def test_добавленных_называет_по_именам(self, monkeypatch):
+        строка = self.строка(monkeypatch, "add", user_ids=[7, 8])
+
+        assert строка == "<i>добавили в чат: поля, HLEB</i>"
+
+    def test_переименование_показывает_новое_название(self, monkeypatch):
+        """«Чат переименовали» без названия — половина новости."""
+        строка = self.строка(monkeypatch, "title", title="11М Дети")
+
+        assert строка == "<i>чат переименовали: 11М Дети</i>"
+
+    def test_незнакомый_код_называет_событием_а_не_показывает_голым(self, monkeypatch):
+        строка = self.строка(monkeypatch, "removeAdmin")
+
+        assert строка == "<i>служебное событие MAX (removeAdmin)</i>"
+
+    def test_чужие_угловые_скобки_не_ломают_разметку(self, monkeypatch):
+        """Название чата пишут люди, а Telegram разбирает угловые скобки как разметку."""
+        строка = self.строка(monkeypatch, "title", title="9А <класс>")
+
+        assert "&lt;класс&gt;" in строка

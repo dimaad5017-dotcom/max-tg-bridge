@@ -209,11 +209,14 @@ SERVICE_CONTENT = {
 }
 
 # Служебные события чата MAX присылает кодом — без расшифровки это просто «CONTROL».
+# Списка кодов MAX нигде не публикует, и в библиотеке его тоже нет: этот собран по тому,
+# что реально приходило в чаты. Новый код когда-нибудь придёт — про него скажет лог.
 CONTROL_EVENTS = {
     "new": "чат создан",
     "add": "добавили в чат",
     "remove": "убрали из чата",
     "leave": "вышел из чата",
+    "joinByLink": "вступил по ссылке",
     "title": "чат переименовали",
     "icon": "сменили картинку чата",
     "pin": "закрепили сообщение",
@@ -451,11 +454,25 @@ def _call_line(attachment: Any) -> str:
 
 
 async def _control_line(attachment: Any) -> str:
-    what = CONTROL_EVENTS.get(attachment.event, attachment.event)
+    """Служебная строка чата: кто пришёл, кто вышел, что переименовали.
+
+    Незнакомый код раньше выводился как есть, и в теме появлялось голое `joinByLink` —
+    со стороны это выглядит поломкой моста, а не событием чата. Прятать такое тоже нельзя:
+    в чате что-то произошло. Поэтому говорим словами, а код оставляем — и в скобках, чтобы
+    было видно, что он от MAX, и в логе, чтобы по нему дописать перевод.
+    """
+    what = CONTROL_EVENTS.get(attachment.event)
+    if what is None:
+        logger.info("незнакомое служебное событие MAX: %s", attachment.event)
+        what = f"служебное событие MAX ({attachment.event})"
+
     # Кого именно добавили или убрали, pymax не разбирает — поле доезжает как «лишнее».
     who = getattr(attachment, "user_ids", None) or getattr(attachment, "userIds", None) or []
-    names = ", ".join([await _sender_name(int(user_id)) for user_id in who])
-    return f"<i>{html.escape(what)}{': ' + html.escape(names) if names else ''}</i>"
+    details = ", ".join([await _sender_name(int(user_id)) for user_id in who])
+    # При переименовании MAX кладёт рядом новое название. «Чат переименовали» без него —
+    # половина новости: в школьных чатах имя меняют часто и не всегда безобидно.
+    details = details or str(getattr(attachment, "title", "") or "")
+    return f"<i>{html.escape(what)}{': ' + html.escape(details) if details else ''}</i>"
 
 
 def _lost(kind: str, reason: str) -> str:
