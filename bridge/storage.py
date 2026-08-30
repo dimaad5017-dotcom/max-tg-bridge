@@ -80,6 +80,16 @@ class TopicMap:
         )
         self._db.commit()
 
+    def forget_topic(self, max_chat_id: int) -> None:
+        """Тему удалили в Telegram — связка врёт, и следующее сообщение должно завести новую.
+
+        Стираем только связку. Пары «сообщение MAX ↔ сообщение Telegram» и метка «докуда
+        доставлено» остаются: они привязаны к чату, а не к теме, и без них мост забыл бы
+        заодно, что уже доставил, и притащил бы всё заново в новую тему.
+        """
+        self._db.execute("DELETE FROM topics WHERE max_chat_id = ?", (max_chat_id,))
+        self._db.commit()
+
     def pair_messages(self, max_chat_id: int, max_message_id: int | str, tg_message_id: int) -> None:
         self._db.execute(
             "INSERT OR REPLACE INTO messages (max_chat_id, max_message_id, tg_message_id) VALUES (?, ?, ?)",

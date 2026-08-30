@@ -14,7 +14,7 @@ import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ContentType, ParseMode
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     BotCommand,
@@ -168,10 +168,14 @@ HELP = (
     "Мост живёт, пока открыто окно <code>4-запустить-мост.cmd</code>."
 )
 
-# Потолок догона: если мост стоял неделю, лучше отдать хвост, чем завалить группу.
-HISTORY_LIMIT = 40
-# Сколько ждём догонялку. С запасом: сорок сообщений на чат — это ещё и картинки.
-CATCH_UP_TIMEOUT = 180
+# Столько сообщений MAX отдаёт за один запрос истории — не наш выбор, а его размер страницы.
+HISTORY_PAGE = 40
+# Потолок догона на чат. Нужен не ради Telegram, а ради чата, которого мост не видел
+# никогда: «всё непрочитанное» там может означать тысячи сообщений за все годы.
+HISTORY_LIMIT = 300
+# Сколько ждём догонялку. Считаем по Telegram, а не по MAX: в группу он пускает около
+# двадцати сообщений в минуту, и сотня накопившихся — это пять минут одних только пауз.
+CATCH_UP_TIMEOUT = 900
 # Как часто перечитываем список чатов на случай, что о новом MAX не сказал.
 NEW_CHAT_SCAN = 300
 
@@ -361,6 +365,17 @@ async def _is_group(chat_id: int) -> bool:
     return group_chats[chat_id]
 
 
+def _ms(value: int | None) -> int | None:
+    """Миллисекунды, которых просит история MAX. None означает «от сейчас».
+
+    Само время MAX шлёт то в секундах, то в миллисекундах, и в запрос истории секунды
+    ушли бы как семидесятый год: история вернулась бы пустая, а догонялка — молча ни с чем.
+    """
+    if value is None or value > 10**11:
+        return value
+    return value * 1000
+
+
 def _moment(value: int) -> str:
     """MAX шлёт время то в секундах, то в миллисекундах — приводим к одному виду."""
     seconds = value / 1000 if value > 10**11 else value
@@ -540,9 +555,18 @@ async def _post_one(method: str, topic_id: int | None, **payload: Any) -> TgMess
     send = getattr(bot, method)
     try:
         return await send(GROUP_ID, message_thread_id=topic_id, **payload)
+    except TelegramRetryAfter as error:
+        # Telegram просит сбавить ход — не отказ, а просьба подождать. Раньше она летела
+        # мимо всех починок и оборачивалась строкой «не доставлено», хотя сообщение было
+        # цело: достаточно было выждать. Секунда сверху — на расхождение часов.
+        logger.warning("Telegram просит подождать %s с — жду и повторяю", error.retry_after)
+        await asyncio.sleep(error.retry_after + 1)
+        return await send(GROUP_ID, message_thread_id=topic_id, **payload)
     except TelegramBadRequest as error:
-        if topic_id is None or "TOPIC_CLOSED" not in str(error).upper():
+        if topic_id is None:
             raise
+        if "TOPIC_CLOSED" not in str(error).upper():
+            return await _past_broken_topic(send, topic_id, error, **payload)
 
     try:
         await bot.reopen_forum_topic(GROUP_ID, topic_id)
@@ -554,6 +578,43 @@ async def _post_one(method: str, topic_id: int | None, **payload: Any) -> TgMess
 
     logger.info("тема %s была закрыта — открыл заново", topic_id)
     return await send(GROUP_ID, message_thread_id=topic_id, **payload)
+
+
+async def _past_broken_topic(
+    send: Callable[..., Any], topic_id: int, error: TelegramBadRequest, **payload: Any
+) -> TgMessage:
+    """Тема отказала не по-знакомому — пробуем общий раздел и по ответу понимаем, кто виноват.
+
+    Тему в Telegram можно удалить, и связка «чат ↔ тема» об этом не узнаёт: мост
+    продолжает слать в номер, которого больше нет. Отказ приходит не TOPIC_CLOSED, а
+    какой-то другой, и раньше на этом всё и кончалось. Хуже, что следом пропадала и
+    строка «не доставлено» — она летела в ту же несуществующую тему. Чат замолкал
+    начисто и навсегда, а понять это можно было, только открыв MAX: то есть никогда.
+
+    Разбирать текст отказа не станем. Telegram волен переписать свои формулировки, и
+    тогда починка перестанет срабатывать — так же тихо, как ломалось до неё. Вместо
+    чтения ставим опыт: шлём то же самое в общий раздел. Прошло — виновата тема, и
+    связку надо рвать, чтобы следующее сообщение завело новую. Не прошло — виновато
+    само сообщение, и отказ уходит наверх нетронутым, как и раньше.
+    """
+    try:
+        posted = await send(GROUP_ID, message_thread_id=None, **payload)
+    except TelegramBadRequest:
+        raise error from None
+
+    logger.error("тема %s не принимает (%s) — написал в General, связку рву", topic_id, error)
+    chat_id = topics.chat_for_topic(topic_id)
+    if chat_id is not None:
+        # Рвём связку один раз: следующие части того же сообщения сюда уже не зайдут,
+        # и человек не получит одно и то же объяснение подряд несколько раз.
+        topics.forget_topic(chat_id)
+        with suppress(TelegramBadRequest):
+            await bot.send_message(
+                GROUP_ID,
+                "<i>тема этого чата больше не отвечает — пишу сюда. Следующее сообщение "
+                "из него заведёт новую тему.</i>",
+            )
+    return posted
 
 
 async def _source(chat_id: int, message: Message, attachment: Any, kind: str) -> tuple[str, str, str] | None:
@@ -756,6 +817,57 @@ async def _try_deliver(chat_id: int, message: Message) -> None:
             )
 
 
+async def _missed_since(
+    client: Client, chat_id: int, delivered: int | None, unread: int, my_id: int | None
+) -> tuple[list[Message], bool]:
+    """Пропущенные сообщения чата — страница за страницей вглубь, а не одной пачкой.
+
+    MAX отдаёт историю кусками по сорок, и мост брал ровно один кусок. Пока он стоял
+    час, этого хватало с избытком. Но неделя простоя — и в школьном чате полторы сотни
+    сообщений: сорок доезжали, сто десять исчезали. Причём беззвучно, что тут хуже
+    всего: метка «докуда доставлено» после догона прыгала в самый конец, и пропавшие
+    сто десять не всплывали уже никогда — ни в этот запуск, ни в любой следующий.
+
+    Поэтому листаем назад, пока не упрёмся в уже доставленное. Потолок всё равно нужен,
+    но по другой причине: в чате, которого мост не видел ни разу, «всё непрочитанное»
+    может означать тысячи сообщений за все годы, и вываливать их в тему разом незачем.
+    Зато если потолок сработал, мост об этом скажет — вторым возвращаемым значением.
+
+    Возвращаем (что доставить, упёрлись ли в потолок). Из потолка оставляем свежее:
+    сегодняшнее «заберите ребёнка» важнее прошлогоднего.
+    """
+    collected: dict[str, Message] = {}
+    edge: int | None = None
+    more = False
+    while True:
+        page = await client.fetch_history(chat_id, backward=HISTORY_PAGE, from_time=_ms(edge)) or []
+        if not page:
+            break
+
+        for message in page:
+            if message.sender != my_id and (delivered is None or message.time > delivered):
+                collected[str(message.id)] = message
+
+        oldest = min(message.time for message in page)
+        # Дошли до уже доставленного — дальше в прошлое незачем, там всё знакомое.
+        reached = delivered is not None and oldest <= delivered
+        if len(collected) >= HISTORY_LIMIT:
+            more = not reached
+            break
+        if reached:
+            break
+        # Чат мост видит впервые — тогда глубину задаёт счётчик непрочитанных.
+        if delivered is None and len(collected) >= unread:
+            break
+        # История кончилась или MAX отдаёт ту же страницу — иначе листали бы вечно.
+        if edge is not None and oldest >= edge:
+            break
+        edge = oldest
+
+    missed = sorted(collected.values(), key=lambda message: message.time)
+    return missed[-HISTORY_LIMIT:], more
+
+
 async def _catch_up(client: Client) -> None:
     """MAX отдаёт сообщения живым потоком, поэтому написанное при выключенном мосте берём историей."""
     my_id = client.me.contact.id if client.me else None
@@ -780,13 +892,17 @@ async def _catch_up(client: Client) -> None:
         if not unread and delivered is None:
             continue
 
-        depth = min(unread, HISTORY_LIMIT) if delivered is None else HISTORY_LIMIT
-        history = await client.fetch_history(chat.id, backward=max(depth, 1)) or []
-        missed = [
-            message
-            for message in sorted(history, key=lambda message: message.time)
-            if message.sender != my_id and (delivered is None or message.time > delivered)
-        ]
+        missed, more = await _missed_since(client, chat.id, delivered, unread, my_id)
+        if more:
+            # Обрезали — значит, надо сказать. Молча потерянное сообщение и есть то самое
+            # молчание, ради которого мост писался: в MAX ты не заходишь и не проверишь.
+            with suppress(Exception):
+                await _post(
+                    "send_message",
+                    await _ensure_topic(chat.id),
+                    text="<i>пока моста не было, сообщений накопилось больше, чем он забирает "
+                    "за раз. Всё, что старше следующего, осталось только в MAX.</i>",
+                )
         for message in missed:
             # По одному: на одном спотыкающемся сообщении догонялка раньше обрывалась
             # целиком — вместе со всеми чатами, до которых ещё не дошла очередь.

@@ -11,7 +11,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
 from bridge import main
 from bridge.storage import TopicMap
@@ -201,6 +201,130 @@ class TestДлинноеСообщение:
 
         склеено = "\n".join(текст for _, текст in бот.отправлено)
         assert склеено.split("\n") == строки
+
+
+class TestПропавшаяТема:
+    """Тему в Telegram можно удалить, а связка «чат ↔ тема» этого не замечает.
+
+    Дальше мост слал в номер, которого нет. Отказ приходил не TOPIC_CLOSED, починка
+    закрытой темы его не ловила, и строка «не доставлено» улетала в ту же пустоту.
+    Чат замолкал целиком и навсегда, а заметить это можно было, только открыв MAX.
+    """
+
+    class Удалённая(ФальшивыйБот):
+        """Telegram, в котором темы больше нет: в неё нельзя, в общий раздел можно."""
+
+        async def send_message(self, chat_id, text=None, message_thread_id=None, **прочее):
+            if message_thread_id == ТЕМА:
+                raise TelegramBadRequest(method=None, message="Bad Request: message thread not found")
+            return await super().send_message(chat_id, text, message_thread_id, **прочее)
+
+    def test_сообщение_всё_равно_доезжает(self, мост):
+        """Главное здесь именно это: в общем разделе сообщение видно, в никуда — нет."""
+        бот = мост(self.Удалённая())
+
+        доставить()
+
+        assert (None, "привет") in бот.отправлено
+
+    def test_рвёт_связку_чтобы_завелась_новая_тема(self, мост):
+        """Иначе следующее сообщение упрётся в тот же несуществующий номер, и так вечно."""
+        мост(self.Удалённая())
+
+        доставить()
+
+        assert main.topics.topic_for_chat(ЧАТ) is None
+
+    def test_объясняет_почему_пишет_мимо_темы(self, мост):
+        """Сообщение, вывалившееся в общий раздел без объяснений, выглядит сбоем моста."""
+        бот = мост(self.Удалённая())
+
+        доставить()
+
+        assert any("новую тему" in текст for _, текст in бот.отправлено)
+
+    def test_объясняет_один_раз_а_не_на_каждую_часть(self, мост):
+        """Длинное сообщение — это несколько отправок, и каждая упрётся в ту же тему."""
+        бот = мост(self.Удалённая())
+
+        доставить(сообщение(text="я" * 10000))
+
+        assert sum("новую тему" in текст for _, текст in бот.отправлено) == 1
+
+    def test_если_и_общий_раздел_отказал_ошибку_не_прячет(self, мост):
+        """Тогда виновата не тема, а само сообщение, и «чинить» тут нечего.
+
+        Ради этого починка и устроена опытом, а не чтением текста ошибки: Telegram
+        волен переписать формулировку, а «прошло в общий раздел или нет» не соврёт.
+        """
+
+        class Глухой(ФальшивыйБот):
+            async def send_message(self, chat_id, text=None, message_thread_id=None, **прочее):
+                raise TelegramBadRequest(method=None, message="Bad Request: chat not found")
+
+        мост(Глухой())
+
+        with pytest.raises(TelegramBadRequest):
+            доставить()
+
+        assert main.topics.topic_for_chat(ЧАТ) == ТЕМА
+
+
+class TestСлишкомЧасто:
+    """429 от Telegram — не отказ, а просьба подождать: сообщение цело, надо выждать.
+
+    Отдельный вид ошибки, и на `TelegramBadRequest` он не похож ничем — мимо всех
+    починок он летел прямо в «не доставлено». Обиднее всего при догоне после простоя:
+    в группу Telegram пускает около двадцати сообщений в минуту, так что сотня
+    накопившихся упиралась в предел гарантированно и превращалась в сотню отговорок.
+    """
+
+    class Ограничитель(ФальшивыйБот):
+        def __init__(self, откажет=1):
+            super().__init__()
+            self.откажет = откажет
+
+        async def send_message(self, chat_id, text=None, message_thread_id=None, **прочее):
+            if self.откажет:
+                self.откажет -= 1
+                raise TelegramRetryAfter(method=None, message="Too Many Requests", retry_after=3)
+            return await super().send_message(chat_id, text, message_thread_id, **прочее)
+
+    def подождать(self, monkeypatch):
+        """Настоящий сон растянул бы тесты на секунды — считаем только, сколько ждали."""
+        засечки = []
+
+        async def не_спать(сколько):
+            засечки.append(сколько)
+
+        monkeypatch.setattr(main.asyncio, "sleep", не_спать)
+        return засечки
+
+    def test_ждёт_и_доносит_сообщение(self, мост, monkeypatch):
+        бот = мост(self.Ограничитель())
+        self.подождать(monkeypatch)
+
+        доставить()
+
+        assert бот.отправлено == [(ТЕМА, "привет")]
+
+    def test_ждёт_столько_сколько_просят(self, мост, monkeypatch):
+        """Меньше — и Telegram откажет снова; секунда сверху на расхождение часов."""
+        мост(self.Ограничитель())
+        засечки = self.подождать(monkeypatch)
+
+        доставить()
+
+        assert засечки == [4]
+
+    def test_не_превращает_ожидание_в_потерю(self, мост, monkeypatch):
+        """Раньше просьба подождать оборачивалась строкой «не доставлено» вместо сообщения."""
+        бот = мост(self.Ограничитель())
+        self.подождать(monkeypatch)
+
+        asyncio.run(main._try_deliver(ЧАТ, сообщение()))
+
+        assert not any("Не доставлено" in текст for _, текст in бот.отправлено)
 
 
 class TestНепредвиденныйСбой:
