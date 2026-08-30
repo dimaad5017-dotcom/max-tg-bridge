@@ -44,6 +44,20 @@ class TopicMap:
         # Реакция у бота одна на сообщение. Помним, где стоит настоящая реакция
         # собеседника, чтобы отметка о прочтении её не затёрла.
         self._db.execute("CREATE TABLE IF NOT EXISTS reacted (tg_message_id INTEGER PRIMARY KEY)")
+        # Цвет человека в чате. Считать его прямо из номера было заманчиво — тогда
+        # хранить нечего вовсе, — но номера ложатся в два десятка ячеек вразнобой, и
+        # в чате на девятнадцать человек больше половины делят цвет с кем-то ещё.
+        # Раздача по одному тратит цвета ровно по штуке и повторов не даёт вовсе,
+        # пока людей меньше, чем цветов. Заодно самые разные цвета достаются тем, кто
+        # заговорил первым, — то есть тем, кого в чате слышно чаще всего.
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS marks ("
+            "  max_chat_id INTEGER NOT NULL,"
+            "  user_id     INTEGER NOT NULL,"
+            "  mark        INTEGER NOT NULL,"
+            "  PRIMARY KEY (max_chat_id, user_id)"
+            ")"
+        )
         self._db.commit()
 
     def topic_for_chat(self, max_chat_id: int) -> int | None:
@@ -122,6 +136,32 @@ class TopicMap:
         """Реакцию сняли — ячейка снова свободна под отметку о прочтении."""
         self._db.execute("DELETE FROM reacted WHERE tg_message_id = ?", (tg_message_id,))
         self._db.commit()
+
+    def mark_for(self, max_chat_id: int, user_id: int, total: int) -> int:
+        """Какой по счёту цвет у этого человека в этом чате; незнакомому выдаём свободный.
+
+        Свободных не осталось — берём самый редкий. В чате, где народу больше, чем цветов,
+        повтор неизбежен, и пусть он достанется тому, у кого сосед по цвету уже есть, а не
+        размножается на всех подряд. Остаток от деления страхует на случай, если набор
+        цветов однажды укоротят: в базе уже лежат номера из прежнего, длинного.
+        """
+        row = self._db.execute(
+            "SELECT mark FROM marks WHERE max_chat_id = ? AND user_id = ?", (max_chat_id, user_id)
+        ).fetchone()
+        if row:
+            return row[0] % total
+
+        used = [0] * total
+        for (mark,) in self._db.execute("SELECT mark FROM marks WHERE max_chat_id = ?", (max_chat_id,)):
+            used[mark % total] += 1
+
+        mark = min(range(total), key=lambda index: (used[index], index))
+        self._db.execute(
+            "INSERT OR REPLACE INTO marks (max_chat_id, user_id, mark) VALUES (?, ?, ?)",
+            (max_chat_id, user_id, mark),
+        )
+        self._db.commit()
+        return mark
 
     def delivered_until(self, max_chat_id: int) -> int | None:
         """Время последнего сообщения, доехавшего до Telegram: с него догоняем после простоя."""
