@@ -703,10 +703,10 @@ async def _catch_up(client: Client) -> None:
         # Живое событие о ней уже не придёт, а по сообщениям её не найти — их нет. Такая
         # группа осталась бы невидимой до первого сообщения, то есть, может быть, надолго.
         try:
-            await _greet_new_chat(chat)
+            await _sync_chat(chat)
         except Exception:
             # Один странный чат не должен утащить за собой всю догонялку.
-            logger.exception("не вышло поздороваться с чатом MAX %s", chat.id)
+            logger.exception("не вышло разобрать чат MAX %s", chat.id)
 
         unread = chat.new_messages or 0
         delivered = topics.delivered_until(chat.id)
@@ -903,9 +903,46 @@ async def _greet_new_chat(chat: Chat) -> None:
     logger.info("новый чат MAX %s (%s)", chat.id, title)
 
 
+async def _rename_topic(chat: Chat) -> None:
+    """Чат переименовали в MAX — переименовываем и тему, иначе список тем врёт.
+
+    Школьные чаты переименовывают: «9А класс» становится «10А», к названию дописывают
+    год или имя учителя. Про само переименование мост говорит строкой в теме, но имя
+    темы оставалось прежним навсегда — и через год в списке висел класс, которого уже
+    нет. А список тем здесь единственный способ найти нужный чат: ищешь по имени и не
+    находишь либо находишь не то.
+    """
+    topic_id = topics.topic_for_chat(chat.id)
+    title = (chat.title or "").strip()
+    if topic_id is None or not title or title == topics.title_for_chat(chat.id):
+        return
+
+    try:
+        await bot.edit_forum_topic(chat_id=GROUP_ID, message_thread_id=topic_id, name=title[:TITLE_LIMIT])
+    except TelegramBadRequest as error:
+        # Без права «Управление темами» переименовать нельзя. Не беда: про переименование
+        # человек всё равно узнает — строкой в самой теме, её пишет `_control_line`.
+        logger.error("не переименовать тему %s: %s", topic_id, error)
+        return
+
+    topics.link(chat.id, topic_id, title)
+    logger.info("тема %s переименована: %s", topic_id, title)
+
+
+async def _sync_chat(chat: Chat) -> None:
+    """Всё, что мост подтягивает из чата MAX: новую группу и новое имя.
+
+    Вместе и в одном месте — потому что мест, откуда это зовут, три: живое событие,
+    запуск и дозор. Разведи их по отдельности, и однажды в одном из трёх забудут
+    про переименование, а искать такое придётся по несовпадению имён.
+    """
+    await _greet_new_chat(chat)
+    await _rename_topic(chat)
+
+
 @client.on_chat_update()
 async def on_max_chat_update(chat: Chat, client: Client) -> None:
-    await _greet_new_chat(chat)
+    await _sync_chat(chat)
 
 
 async def _watch_new_chats() -> None:
@@ -926,7 +963,7 @@ async def _watch_new_chats() -> None:
         await asyncio.sleep(NEW_CHAT_SCAN)
         try:
             for chat in await client.fetch_chats() or []:
-                await _greet_new_chat(chat)
+                await _sync_chat(chat)
         except Exception:
             # Сеть моргнула или MAX ответил не так. Это не повод бросать проверку
             # навсегда — через пять минут спросим снова.

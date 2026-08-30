@@ -11,6 +11,7 @@ from itertools import count
 from types import SimpleNamespace
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
 
 from bridge import main
 from bridge.storage import TopicMap
@@ -32,11 +33,18 @@ def чат(chat_id=777, kind="CHAT", status="ACTIVE", title="9А класс"):
 
 
 class ФальшивыйБот:
-    def __init__(self):
+    def __init__(self, переименовывать=True):
         self.отправлено = []
+        self.переименовано = []
+        self.переименовывать = переименовывать
 
     async def send_message(self, chat_id, text, **прочее):
         self.отправлено.append(text)
+
+    async def edit_forum_topic(self, chat_id, message_thread_id, name):
+        if not self.переименовывать:
+            raise TelegramBadRequest(method=None, message="not enough rights")
+        self.переименовано.append((message_thread_id, name))
 
 
 class ФальшивыйMAX:
@@ -177,3 +185,70 @@ class TestДозорЗаНовымиЧатами:
         дозор(RuntimeError("MAX не ответил"), [чат(title="9А класс")])
 
         assert len(мост.отправлено) == 1
+
+    def test_дозор_подхватывает_и_переименование(self, мост, дозор):
+        """Переименовать могли и пока мост молчал: тогда живого события уже не будет."""
+        main.topics.link(777, 5, "9А класс")
+
+        дозор([чат(title="10А класс")])
+
+        assert мост.переименовано == [(5, "10А класс")]
+
+
+class TestПереименование:
+    """Чат переименовали в MAX — тема обязана назваться так же.
+
+    Школьные чаты переименовывают: «9А класс» становится «10А», к названию дописывают
+    год или имя учителя. Про само переименование мост говорил строкой в теме, а имя темы
+    оставалось прежним навсегда — и через год в списке висел класс, которого уже нет.
+    Список тем здесь единственный способ найти нужный чат: не найдёшь либо найдёшь не то.
+    """
+
+    def подтянуть(self, **поля):
+        asyncio.run(main._sync_chat(чат(**поля)))
+
+    def test_тема_получает_новое_имя(self, мост):
+        main.topics.link(777, 5, "9А класс")
+
+        self.подтянуть(title="10А класс")
+
+        assert мост.переименовано == [(5, "10А класс")]
+
+    def test_второй_раз_то_же_имя_не_трогает(self, мост):
+        """Дозор приносит тот же список каждые пять минут — это был бы запрос на пустом месте."""
+        main.topics.link(777, 5, "9А класс")
+
+        self.подтянуть(title="10А класс")
+        self.подтянуть(title="10А класс")
+
+        assert len(мост.переименовано) == 1
+
+    def test_совпадающее_имя_вообще_не_повод_ходить_в_telegram(self, мост):
+        main.topics.link(777, 5, "9А класс")
+
+        self.подтянуть(title="9А класс")
+
+        assert мост.переименовано == []
+
+    def test_длинное_имя_обрезает_до_предела_telegram(self, мост):
+        """Длиннее 128 знаков Telegram имя темы не примет — а название пишут люди."""
+        main.topics.link(777, 5, "старое")
+
+        self.подтянуть(title="я" * 300)
+
+        assert len(мост.переименовано[0][1]) == 128
+
+    def test_без_права_управлять_темами_не_ломает_мост(self, мост, monkeypatch):
+        """Права может не быть. Про переименование человек всё равно узнает строкой в теме."""
+        monkeypatch.setattr(main, "bot", ФальшивыйБот(переименовывать=False))
+        main.topics.link(777, 5, "9А класс")
+
+        self.подтянуть(title="10А класс")
+
+        assert main.topics.title_for_chat(777) == "9А класс"
+
+    def test_про_чат_без_темы_молчит(self, мост):
+        """Темы нет — переименовывать нечего, а заводить её из-за одного имени незачем."""
+        self.подтянуть(chat_id=999, kind="DIALOG", title="Павел")
+
+        assert мост.переименовано == []
