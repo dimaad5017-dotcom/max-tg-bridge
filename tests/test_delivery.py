@@ -19,8 +19,8 @@ from bridge.storage import TopicMap
 ЧАТ, ТЕМА = 777, 5
 
 
-def сообщение(text="привет", message_id="100"):
-    return SimpleNamespace(id=message_id, text=text, attaches=[], sender=42, time=1000, link=None)
+def сообщение(text="привет", message_id="100", time=1000):
+    return SimpleNamespace(id=message_id, text=text, attaches=[], sender=42, time=time, link=None)
 
 
 class ФальшивыйБот:
@@ -58,6 +58,9 @@ class ФальшивыйБот:
 class ФальшивыйMAX:
     async def read_message(self, message_id, chat_id):
         return None
+
+    async def get_chat(self, chat_id):
+        return SimpleNamespace(title=f"чат {chat_id}", type="CHAT", participants=[])
 
 
 @pytest.fixture
@@ -392,3 +395,107 @@ class TestНепредвиденныйСбой:
         asyncio.run(main._try_deliver(ЧАТ, сообщение()))
 
         assert бот.отправлено == [(ТЕМА, "привет")]
+
+
+class TestОчередьЧата:
+    """MAX отдаёт каждое входящее отдельной задачей — и они бегут наперегонки.
+
+    Сообщение с картинкой ждёт, пока она выкачается; текст, написанный следом,
+    улетает мгновенно. В теме разговор читается вперемешку, а метка «докуда
+    доставлено» успевает перескочить через ещё не доехавшую картинку: выключи мост
+    в эту секунду — и её не догонит уже никто.
+    """
+
+    @pytest.fixture
+    def медленное(self, monkeypatch):
+        """Первое сообщение долго собирается, второе — мгновенно, как текст после фото."""
+        настоящий = main._compose
+
+        async def собрать(chat_id, message):
+            if message.text == "фото":
+                await asyncio.sleep(0.05)
+            return await настоящий(chat_id, message)
+
+        monkeypatch.setattr(main, "_compose", собрать)
+
+    def подряд(self, *сообщения):
+        """Так их и приносит MAX: по задаче на каждое, все разом."""
+
+        async def разом():
+            await asyncio.gather(*(main._try_deliver(ЧАТ, msg) for msg in сообщения))
+
+        asyncio.run(разом())
+
+    def test_доставляет_в_том_порядке_в_каком_написали(self, мост, медленное):
+        бот = мост(ФальшивыйБот())
+
+        self.подряд(сообщение("фото", "100", 1000), сообщение("а следом текст", "101", 2000))
+
+        assert [текст for _, текст in бот.отправлено] == ["фото", "а следом текст"]
+
+    def test_метка_не_обгоняет_ещё_не_доехавшее(self, мост, медленное):
+        """Метка «докуда доставлено» — обещание, что всё до неё в Telegram уже есть.
+
+        Стоит ей уйти вперёд картинки, которая ещё качается, — и обещание становится
+        ложью ровно того рода, которую потом никак не заметить.
+        """
+        отметки = []
+
+        class Свидетель(ФальшивыйБот):
+            async def send_message(self, chat_id, text=None, message_thread_id=None, **прочее):
+                отметки.append((text, main.topics.delivered_until(ЧАТ)))
+                return await super().send_message(chat_id, text, message_thread_id, **прочее)
+
+        мост(Свидетель())
+
+        self.подряд(сообщение("фото", "100", 1000), сообщение("а следом текст", "101", 2000))
+
+        assert отметки == [("фото", None), ("а следом текст", 1000)]
+
+    def test_новому_чату_заводит_одну_тему_а_не_две(self, мост, медленное):
+        """Две темы на чат — это одна лишняя, из которой не ответишь: мост её не знает."""
+
+        class Считающий(ФальшивыйБот):
+            def __init__(self):
+                super().__init__()
+                self.создано = 0
+
+            async def create_forum_topic(self, chat_id, name):
+                self.создано += 1
+                # Настоящий Telegram отвечает не сразу — на этой паузе всё и ломалось.
+                await asyncio.sleep(0.01)
+                return SimpleNamespace(message_thread_id=90 + self.создано)
+
+        бот = мост(Считающий())
+        main.topics.forget_topic(ЧАТ)
+
+        self.подряд(сообщение("фото", "100", 1000), сообщение("а следом текст", "101", 2000))
+
+        assert бот.создано == 1
+        assert {тема for тема, _ in бот.отправлено} == {91}
+
+    def test_одно_и_то_же_сообщение_дважды_не_приносит(self, мост):
+        """Догонялка тянет историю как раз тогда, когда чат пишет, — и берёт то же самое."""
+        бот = мост(ФальшивыйБот())
+
+        asyncio.run(main._try_deliver(ЧАТ, сообщение("привет", "100")))
+        asyncio.run(main._try_deliver(ЧАТ, сообщение("привет", "100")))
+
+        assert бот.отправлено == [(ТЕМА, "привет")]
+
+    def test_разные_чаты_друг_друга_не_ждут(self, мост, медленное):
+        """Замок на чат, а не на мост: картинка в одном не держит «заберите ребёнка» в другом."""
+        ДРУГОЙ = 888
+        бот = мост(ФальшивыйБот())
+        main.topics.link(ДРУГОЙ, 6, "9Б класс")
+        main.group_chats[ДРУГОЙ] = False
+
+        async def разом():
+            await asyncio.gather(
+                main._try_deliver(ЧАТ, сообщение("фото", "100", 1000)),
+                main._try_deliver(ДРУГОЙ, сообщение("срочное", "200", 1000)),
+            )
+
+        asyncio.run(разом())
+
+        assert бот.отправлено[0] == (6, "срочное")

@@ -275,6 +275,9 @@ CONTENT_NAMES = {
 
 UPLOAD_LIMIT = 50 * 1024 * 1024  # Столько бот вправе залить в Telegram.
 CAPTION_LIMIT = 1024  # Подпись под файлом короче обычного сообщения.
+# Столько ждём один файл. Полста мегабайт — это меньше минуты даже на слабом канале;
+# если не уложились, дело не в размере, а в том, что отдача встала совсем.
+DOWNLOAD_TIMEOUT = 120
 
 # Чем слать: метод бота и имя аргумента под файл.
 MEDIA_SENDERS = {
@@ -411,22 +414,45 @@ async def _profile(user_id: int) -> str:
     return "\n".join(lines)
 
 
+def _lock_for(queue: dict[int, asyncio.Lock], chat_id: int) -> asyncio.Lock:
+    """Замок на один чат. Заводим по надобности: чатов десятки, а не тысячи."""
+    lock = queue.get(chat_id)
+    if lock is None:
+        lock = queue[chat_id] = asyncio.Lock()
+    return lock
+
+
+# Тему одного чата заводим по одному разу. Проверить «темы нет» и создать её —
+# два действия, между которыми мост уходит ждать ответа Telegram, а в это время
+# тем же самым занят кто-то ещё: MAX отдаёт каждое входящее отдельной задачей, да
+# и обход чатов раз в пять минут ходит той же дорогой. Оба увидят «темы нет», обе
+# темы создадутся, и одна останется сиротой — сообщения в ней есть, а ответить из
+# неё нельзя: мост про такую тему не знает.
+_topic_queue: dict[int, asyncio.Lock] = {}
+
+
 async def _ensure_topic(chat_id: int, title: str | None = None) -> int | None:
     """None означает «темы не будет» — сообщение уйдёт в General, но не пропадёт."""
     topic_id = topics.topic_for_chat(chat_id)
     if topic_id is not None:
         return topic_id
 
-    title = title or await _topic_title(chat_id)
-    try:
-        topic = await bot.create_forum_topic(chat_id=GROUP_ID, name=title[: _cut(title, TITLE_LIMIT)])
-    except TelegramBadRequest as error:
-        logger.error("не создать тему для чата MAX %s: %s", chat_id, error)
-        return None
+    async with _lock_for(_topic_queue, chat_id):
+        # Пока стояли в очереди, тему мог завести тот, кто стоял перед нами.
+        topic_id = topics.topic_for_chat(chat_id)
+        if topic_id is not None:
+            return topic_id
 
-    topics.link(chat_id, topic.message_thread_id, title)
-    logger.info("создана тема %s для чата MAX %s (%s)", topic.message_thread_id, chat_id, title)
-    return topic.message_thread_id
+        title = title or await _topic_title(chat_id)
+        try:
+            topic = await bot.create_forum_topic(chat_id=GROUP_ID, name=title[: _cut(title, TITLE_LIMIT)])
+        except TelegramBadRequest as error:
+            logger.error("не создать тему для чата MAX %s: %s", chat_id, error)
+            return None
+
+        topics.link(chat_id, topic.message_thread_id, title)
+        logger.info("создана тема %s для чата MAX %s (%s)", topic.message_thread_id, chat_id, title)
+        return topic.message_thread_id
 
 
 def _tg_len(text: str) -> int:
@@ -635,13 +661,35 @@ async def _source(chat_id: int, message: Message, attachment: Any, kind: str) ->
 
 
 async def _download(url: str, name: str) -> Fetched:
+    """Тянем кусками и считаем байты сами: заявленному размеру верить нельзя.
+
+    Раньше проверка смотрела на размер, объявленный в заголовке, и на этом успокаивалась.
+    Но объявлять его никто не обязан: отдают файл потоком, размера не называют — и `or 0`
+    превращает «не знаю» в «ноль байт», то есть в разрешение. Дальше мост читал ответ
+    целиком в память, и двухчасовое видео с утренника укладывало машину в своп.
+
+    Поэтому режем по-настоящему: как только накопилось больше положенного, бросаем качать
+    и говорим словами. Сроку тоже нужен свой. По умолчанию ожидание тянется пять минут,
+    а у догонялки весь бюджет — пятнадцать: три зависших файла, и она кончилась,
+    толком не начавшись.
+    """
+    too_big = "весит больше 50 МБ, столько Telegram не принимает"
     try:
-        async with aiohttp.ClientSession() as session, session.get(url) as response:
+        timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT, sock_connect=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session, session.get(url) as response:
             response.raise_for_status()
             if (response.content_length or 0) > UPLOAD_LIMIT:
-                return Fetched(None, "весит больше 50 МБ, столько Telegram не принимает")
-            return Fetched(BufferedInputFile(await response.read(), filename=name))
-    except aiohttp.ClientError as error:
+                return Fetched(None, too_big)
+
+            body = bytearray()
+            async for piece in response.content.iter_chunked(64 * 1024):
+                body += piece
+                # Обрываем на месте, а не после. Иначе смысл проверки только в том,
+                # чтобы сказать про уже съеденную память, что её съели.
+                if len(body) > UPLOAD_LIMIT:
+                    return Fetched(None, too_big)
+            return Fetched(BufferedInputFile(bytes(body), filename=name))
+    except (aiohttp.ClientError, TimeoutError) as error:
         logger.error("не скачать вложение %s: %s", name, error)
         return Fetched(None, f"не скачалось ({type(error).__name__})")
 
@@ -751,6 +799,11 @@ def _quoted(chat_id: int, message: Message) -> ReplyParameters | None:
 
 
 async def _deliver(chat_id: int, message: Message) -> None:
+    if topics.tg_message_for(chat_id, message.id) is not None:
+        # Это сообщение уже в теме. Живое событие и догонялка приносят одно и то же,
+        # когда чат пишет ровно в те секунды, пока догонялка тянет его историю.
+        return
+
     topic_id = await _ensure_topic(chat_id)
     caption, media = await _compose(chat_id, message)
     reply = _quoted(chat_id, message)
@@ -792,6 +845,23 @@ async def _deliver(chat_id: int, message: Message) -> None:
         logger.error("не отметить прочтение в MAX чата %s: %s", chat_id, error)
 
 
+# Сообщения одного разговора доставляем строго по одному.
+#
+# MAX отдаёт каждое входящее отдельной задачей, и они бегут наперегонки. Сообщение
+# с фотографией ждёт, пока она выкачается, а текст, написанный следом, улетает в
+# Telegram мгновенно — и разговор в теме читается вперемешку. Это не редкая
+# случайность: достаточно, чтобы в середине очереди оказался файл.
+#
+# Хуже перепутанного порядка то, что за ним стоит. Метка «докуда доставлено» ставится
+# в конце доставки, и быстрое сообщение успевает передвинуть её через ту фотографию,
+# которая ещё качается. Выключи мост в эту секунду — и фотографию не догонит уже
+# никто: метка говорит, что до неё всё доставлено. Молчание, ради которого мост писался.
+#
+# Замок именно на чат, а не на весь мост: школьные чаты идут независимо, и медленная
+# картинка в одном не должна задерживать «заберите ребёнка» в другом.
+_chat_queue: dict[int, asyncio.Lock] = {}
+
+
 async def _try_deliver(chat_id: int, message: Message) -> None:
     """Доставить и, если не вышло, сказать об этом словами. Промолчать нельзя.
 
@@ -804,17 +874,18 @@ async def _try_deliver(chat_id: int, message: Message) -> None:
     там так и останется. Пусть лучше в теме будет строка «не доставлено» с причиной: по
     ней видно, что сообщение есть, и понятно, куда идти смотреть.
     """
-    try:
-        await _deliver(chat_id, message)
-    except Exception as error:
-        logger.exception("не доставить сообщение из чата MAX %s", chat_id)
-        # Здесь уже нечем починить: если и эта отправка не пройдёт, остаётся только лог.
-        with suppress(Exception):
-            await _post(
-                "send_message",
-                topics.topic_for_chat(chat_id),
-                text=_lost("сообщение", html.escape(str(error) or type(error).__name__)),
-            )
+    async with _lock_for(_chat_queue, chat_id):
+        try:
+            await _deliver(chat_id, message)
+        except Exception as error:
+            logger.exception("не доставить сообщение из чата MAX %s", chat_id)
+            # Здесь уже нечем починить: если и эта отправка не пройдёт, остаётся только лог.
+            with suppress(Exception):
+                await _post(
+                    "send_message",
+                    topics.topic_for_chat(chat_id),
+                    text=_lost("сообщение", html.escape(str(error) or type(error).__name__)),
+                )
 
 
 async def _missed_since(

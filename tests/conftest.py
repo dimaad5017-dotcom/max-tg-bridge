@@ -27,6 +27,24 @@ config.WORK_DIR = _SANDBOX
 config.MAP_DB = _SANDBOX / "topics.db"
 
 
+@pytest.fixture(autouse=True)
+def _чистые_очереди():
+    """Замки на чаты — с чистого листа на каждый тест.
+
+    Мост живёт в одном цикле событий, а тесты заводят по своему на каждый: замок,
+    подождавший своей очереди в прошлом тесте, запомнил тот цикл и в следующем
+    падает с «bound to a different event loop». Правится не в мосте, а здесь: это
+    не его беда, а особенность того, как мы его запускаем.
+    """
+    from bridge import main
+
+    main._chat_queue.clear()
+    main._topic_queue.clear()
+    yield
+    main._chat_queue.clear()
+    main._topic_queue.clear()
+
+
 @pytest.fixture
 def topics(tmp_path):
     """Пустое хранилище связок на один тест."""
