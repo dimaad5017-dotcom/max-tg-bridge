@@ -87,7 +87,12 @@ client = Client(
 )
 topics = TopicMap(MAP_DB)
 
-# Telegram-поллинг стартует раньше, чем поднимется сессия MAX.
+# Поднята ли связь с MAX. Telegram-поллинг стартует раньше, чем сессия MAX, и всё,
+# что идёт в MAX, сперва дожидается этой отметки.
+#
+# Гасим её при обрыве, а не только зажигаем при старте. Иначе она означала бы «связь
+# когда-то была», а спрашивают у неё «связь есть сейчас» — и мост, оставшийся без MAX,
+# продолжал бы считать себя целым.
 max_ready = asyncio.Event()
 
 # «Был в сети» MAX присылает событиями, хранить между запусками нечего.
@@ -178,8 +183,25 @@ HISTORY_LIMIT = 300
 CATCH_UP_TIMEOUT = 900
 # Как часто перечитываем список чатов на случай, что о новом MAX не сказал.
 NEW_CHAT_SCAN = 300
+# Сколько ждём связь с MAX, прежде чем сказать «не отправлено».
+#
+# Ждать вообще нужно: Telegram поднимается за секунду, MAX — за несколько, и сообщение,
+# написанное сразу после запуска, должно дождаться, а не отвалиться. Но ждать без конца
+# нельзя: если MAX не поднимется вовсе, ожидание длится вечно и молча.
+#
+# Двадцать секунд — с запасом на обычный вход и мало для человека, который смотрит в
+# экран. Ошибиться в короткую сторону не страшно: скажем «повтори», и он повторит.
+MAX_WAIT = 20
 
 NO_TOPIC = "но тема не создалась — дай боту право «Управление темами», пока пишу сюда, в General."
+
+# Первым делом, до всего остального: человек спросил «живой ли мост» и должен узнать,
+# что половина его сейчас не работает, а не вычитывать это между строк справки.
+NO_MAX = (
+    "⚠️ <b>Связи с MAX нет.</b> Отсюда сейчас ничего не отправится, и оттуда ничего "
+    "не придёт. Мост восстанавливает связь сам — если через несколько минут не "
+    "заработает, проверь интернет и перезапусти его."
+)
 
 ATTACHMENT_LABELS = {
     "PHOTO": "фото",
@@ -297,6 +319,33 @@ class Media(NamedTuple):
 class Fetched(NamedTuple):
     file: BufferedInputFile | None
     problem: str = ""
+
+
+class MaxOffline(Exception):
+    """Связи с MAX нет, и распоряжение из Telegram выполнить нечем."""
+
+
+async def _wait_max() -> None:
+    """Дождаться связь с MAX или сказать вслух, что её нет.
+
+    Мост состоит из двух половин, и Telegram-половина поднимается первой. Всё, что идёт
+    в MAX, ждёт вторую — и раньше ждало без срока. Пока MAX поднимается за пару секунд,
+    разницы нет. Но pymax при обрыве не сдаётся: он молча уходит в вечный цикл
+    «подождать и попробовать снова». Мост при этом жив, Telegram отвечает, окно выглядит
+    рабочим — а половины, которая слушает MAX, нет.
+
+    Вот тогда ожидание без срока и становится той самой бедой, от которой мост написан.
+    Пишешь в тему «заберите ребёнка» — сообщение принято, галочка стоит, ответа нет.
+    Не «не отправлено», не ошибка — вообще ничего. И оно даже не полежит до лучших
+    времён: Telegram считает его отданным, так что перезапуск моста его не воскресит.
+
+    Поэтому со сроком и с ошибкой, а не с бесконечным ожиданием. Пусть лучше человек
+    увидит «не отправлено, повтори» и повторит, чем будет ждать ответа, которого нет.
+    """
+    try:
+        await asyncio.wait_for(max_ready.wait(), timeout=MAX_WAIT)
+    except TimeoutError:
+        raise MaxOffline from None
 
 
 def _display_name(user: User | None, user_id: int | None) -> str:
@@ -1009,6 +1058,10 @@ async def _hide_presence(client: Client) -> None:
 @client.on_start()
 async def on_max_start(client: Client) -> None:
     logger.info("MAX подключён, id=%s", client.me.contact.id if client.me else "?")
+    # Зажигаем сразу, а не в конце. Связь уже есть — с этой секунды отправить в MAX можно,
+    # и держать написанное в Telegram незачем. А в конце эта строка стоила дорого: догон
+    # длится до пятнадцати минут, и все пятнадцать любое твоё сообщение молча ждало бы его.
+    max_ready.set()
     await _hide_presence(client)
     try:
         # Со сроком: запрос к MAX может не получить ответа никогда, и тогда мост
@@ -1019,7 +1072,6 @@ async def on_max_start(client: Client) -> None:
         logger.error("догонялка не уложилась в %s секунд — иду дальше без неё", CATCH_UP_TIMEOUT)
     except Exception:
         logger.exception("не вышло догнать пропущенные сообщения")
-    max_ready.set()
 
 
 @client.on_presence()
@@ -1214,6 +1266,8 @@ async def _watch_new_chats() -> None:
     а школьный чат, о котором не узнал, стоит дорого. Объявление от этого не задвоится:
     чат с уже заведённой темой `_greet_new_chat` пропускает.
     """
+    # Здесь без срока и нарочно: это не распоряжение человека, а фоновый обход. Ему
+    # некому жаловаться и некуда торопиться — пусть просто дождётся связи и пойдёт.
     await max_ready.wait()
     while True:
         await asyncio.sleep(NEW_CHAT_SCAN)
@@ -1228,6 +1282,17 @@ async def _watch_new_chats() -> None:
 
 @client.on_disconnect()
 async def on_max_disconnect(error: Exception, reconnect: bool, delay: float) -> None:
+    """Связь с MAX оборвалась — и мост обязан перестать считать себя целым.
+
+    pymax после обрыва не сдаётся и не падает: он молча уходит в цикл «подождать и
+    попробовать снова», и цикл этот бесконечный. Снаружи мост выглядит живым — окно
+    открыто, Telegram отвечает, — но половины, которая слушает MAX, у него нет.
+
+    Пока отметку только зажигали при старте, она означала «связь когда-то была», а
+    спрашивали у неё «связь есть сейчас». Гасим — и всё, что идёт в MAX, снова начинает
+    честно ждать её и честно говорить, если не дождалось.
+    """
+    max_ready.clear()
     logger.warning("MAX разорвал связь (%s), переподключение: %s", error, reconnect)
 
 
@@ -1242,7 +1307,14 @@ async def on_max_message(message: Message, client: Client) -> None:
 
 @dp.message(F.chat.id == GROUP_ID, Command("help", "start"))
 async def on_help_command(tg_message: TgMessage) -> None:
-    await tg_message.answer(HELP)
+    """Единственная команда, которая отвечает даже без MAX, — и потому обязана не врать.
+
+    Инструкция называет `/help` проверкой «мост живой»: ответил — работает. Но отвечает
+    на него Telegram-половина, а она поднимается первой и живёт своей жизнью. Пока MAX
+    лежит, `/help` бодро отвечал «всё работает» — то есть ровно та проверка, которую
+    человеку велено делать, показывала зелёное на сломанном мосте.
+    """
+    await tg_message.answer(HELP if max_ready.is_set() else NO_MAX + "\n\n" + HELP)
 
 
 @dp.message(F.chat.id == GROUP_ID, Command("status"))
@@ -1252,7 +1324,7 @@ async def on_status_command(tg_message: TgMessage) -> None:
         await tg_message.reply("Эту команду надо звать внутри темы собеседника.")
         return
 
-    await max_ready.wait()
+    await _wait_max()
     chat = await client.get_chat(chat_id)
     peer_id = None if await _is_group(chat_id) else _peer_id(chat)
     if peer_id is None:
@@ -1271,7 +1343,7 @@ async def on_join_command(tg_message: TgMessage, command: CommandObject) -> None
         await tg_message.reply("Пришли ссылку-приглашение: <code>/join ссылка</code>")
         return
 
-    await max_ready.wait()
+    await _wait_max()
     try:
         chat = await client.join_group(command.args.strip())
     except ApiError as error:
@@ -1304,7 +1376,7 @@ async def on_write_command(tg_message: TgMessage, command: CommandObject) -> Non
         await tg_message.reply("Формат: <code>/write +79991234567 привет</code>")
         return
 
-    await max_ready.wait()
+    await _wait_max()
     phone = normalize_phone(raw_phone)
     try:
         user = await client.search_by_phone(phone)
@@ -1332,7 +1404,7 @@ async def on_chats_command(tg_message: TgMessage) -> None:
     Без такого списка о них неоткуда узнать, не открывая сам MAX, — а весь смысл
     моста в том, чтобы туда не заходить.
     """
-    await max_ready.wait()
+    await _wait_max()
     chats = await client.fetch_chats() or []
     lines = []
     for chat in chats:
@@ -1382,7 +1454,7 @@ async def on_leave_command(tg_message: TgMessage, command: CommandObject) -> Non
         await tg_message.reply("Эту команду надо звать внутри темы того чата, из которого выходишь.")
         return
 
-    await max_ready.wait()
+    await _wait_max()
     if not await _is_group(chat_id):
         # Советовать «заблокируй в MAX» — значит гнать человека туда, куда он не ходит:
         # ради этого мост и написан. Говорим про то, что делается здесь и одним движением.
@@ -1436,7 +1508,7 @@ async def on_hidden_command(tg_message: TgMessage, command: CommandObject) -> No
         )
         return
 
-    await max_ready.wait()
+    await _wait_max()
     try:
         await client.change_profile_settings(PrivacySettingsUpdate(hide_online_status=choice == "on"))
     except ApiError as error:
@@ -1480,7 +1552,7 @@ async def on_del_command(tg_message: TgMessage) -> None:
         )
         return
 
-    await max_ready.wait()
+    await _wait_max()
     chat_id, max_message_id = pair
     await _erase(chat_id, max_message_id, target.message_id)
     # Саму команду убираем следом: сообщения, к которому она относилась, уже нет,
@@ -1578,7 +1650,7 @@ async def on_tg_message(tg_message: TgMessage) -> None:
     pair = topics.max_message_for(quoted.message_id) if quoted else None
     reply_to = int(pair[1]) if pair else None
 
-    await max_ready.wait()
+    await _wait_max()
     try:
         sent = await client.send_message(chat_id, text, reply_to=reply_to, attachments=attachments)
     except ApiError as error:
@@ -1633,18 +1705,30 @@ async def on_tg_error(event: ErrorEvent) -> None:
     Отвечаем прямо туда, откуда пришли: в теме собеседника это видно рядом с самим
     сообщением, и сразу понятно, какое именно не ушло.
     """
-    logger.error("сорвалось на сообщении из Telegram", exc_info=event.exception)
+    offline = isinstance(event.exception, MaxOffline)
+    if offline:
+        logger.error("связи с MAX нет — распоряжение из Telegram выполнить нечем")
+    else:
+        logger.error("сорвалось на сообщении из Telegram", exc_info=event.exception)
+
     message = event.update.message or event.update.edited_message
     if message is None:
         return
 
+    # Про потерянную связь говорим отдельно, а не «мост споткнулся». Разница не в
+    # вежливости: тут человеку понятно и что делать (повторить), и что виноват не он.
+    text = (
+        "<b>Не отправлено.</b> Мост потерял связь с MAX и сейчас восстанавливает её сам.\n"
+        "Твоё сообщение никуда не ушло — повтори его через минуту.\n"
+        "<i>Если так и не заработает, проверь интернет и перезапусти мост.</i>"
+        if offline
+        else "<b>Не отправлено.</b> Мост споткнулся: "
+        f"<i>{html.escape(str(event.exception) or type(event.exception).__name__)}</i>\n"
+        "Попробуй ещё раз. Если повторится — загляни в окно моста, там записано подробно."
+    )
     # Если и ответить не вышло, остаётся лог: больше сказать уже нечем.
     with suppress(Exception):
-        await message.reply(
-            "<b>Не отправлено.</b> Мост споткнулся: "
-            f"<i>{html.escape(str(event.exception) or type(event.exception).__name__)}</i>\n"
-            "Попробуй ещё раз. Если повторится — загляни в окно моста, там записано подробно."
-        )
+        await message.reply(text)
 
 
 @dp.edited_message(F.chat.id == GROUP_ID, F.message_thread_id.is_not(None))
@@ -1670,7 +1754,7 @@ async def on_tg_edit(tg_message: TgMessage) -> None:
         )
         return
 
-    await max_ready.wait()
+    await _wait_max()
     try:
         await client.edit_message(chat_id, int(max_message_id), text=tg_message.text)
     except (ApiError, ValueError, TypeError) as error:
@@ -1765,7 +1849,23 @@ async def on_tg_reaction(event: MessageReactionUpdated) -> None:
 
     chat_id, max_message_id = pair
     emoji = next((item.emoji for item in event.new_reaction if item.type == "emoji"), None)
-    await max_ready.wait()
+    try:
+        await _wait_max()
+    except MaxOffline:
+        # Общая сеть под ошибками сюда не дотягивается: у события «поставили реакцию» нет
+        # сообщения, в ответ на которое она отвечает. Поэтому отвечаем здесь сами.
+        #
+        # Особенно важно для «корзины»: это не украшение, а распоряжение стереть сообщение
+        # у собеседника. Промолчи мост — и ты уйдёшь уверенным, что стёр, а оно на месте.
+        with suppress(Exception):
+            await bot.send_message(
+                GROUP_ID,
+                "<b>Не сделано.</b> Мост потерял связь с MAX и восстанавливает её сам.\n"
+                "Сними реакцию и поставь заново через минуту."
+                + ("\n<i>Сообщение у собеседника осталось.</i>" if emoji == DELETE_MARK else ""),
+                reply_to_message_id=event.message_id,
+            )
+        return
 
     if emoji == DELETE_MARK:
         # Наверх не пересылаем: это не реакция собеседнику, а распоряжение мосту.
