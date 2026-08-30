@@ -11,7 +11,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
 
 from bridge import main
 from bridge.storage import TopicMap
@@ -328,6 +328,77 @@ class TestСлишкомЧасто:
         asyncio.run(main._try_deliver(ЧАТ, сообщение()))
 
         assert not any("Не доставлено" in текст for _, текст in бот.отправлено)
+
+
+class TestСетьМоргнула:
+    """Щель между половинами: MAX жив и уже принёс сообщение, а Telegram не отвечает.
+
+    Обе половины умеют ждать связь сами, но эта секунда не принадлежит ни одной из
+    них. Отказ приходит не «подожди» и не «нельзя», а «сети нет» — и его никто не ловил.
+
+    Совсем сообщение не пропадало: отметку «доставлено» мост ставит только после
+    удачной отправки, и догонялка притащила бы его снова. Но догонялка бывает при
+    запуске и при переподключении MAX — то есть письмо ждало бы перезагрузки. И
+    сказать об этом было некому: строка «не доставлено» уходит в тот же Telegram.
+    """
+
+    class Моргающий(ФальшивыйБот):
+        def __init__(self, моргнёт=1):
+            super().__init__()
+            self.моргнёт = моргнёт
+            self.попыток = 0
+
+        async def send_message(self, chat_id, text=None, message_thread_id=None, **прочее):
+            self.попыток += 1
+            if self.моргнёт:
+                self.моргнёт -= 1
+                raise TelegramNetworkError(method=None, message="Cannot connect to host")
+            return await super().send_message(chat_id, text, message_thread_id, **прочее)
+
+    def подождать(self, monkeypatch):
+        засечки = []
+
+        async def не_спать(сколько):
+            засечки.append(сколько)
+
+        monkeypatch.setattr(main.asyncio, "sleep", не_спать)
+        return засечки
+
+    def test_короткий_обрыв_переживает(self, мост, monkeypatch):
+        бот = мост(self.Моргающий())
+        self.подождать(monkeypatch)
+
+        доставить()
+
+        assert бот.отправлено == [(ТЕМА, "привет")]
+
+    def test_паузы_растут_а_не_долбят_подряд(self, мост, monkeypatch):
+        """Иначе четыре попытки укладываются в миллисекунду и ничего не пережидают."""
+        мост(self.Моргающий(моргнёт=4))
+        засечки = self.подождать(monkeypatch)
+
+        доставить()
+
+        assert засечки == [2, 4, 8, 16]
+
+    def test_долгий_обрыв_не_держит_вечно(self, мост, monkeypatch):
+        """Полминуты — предел. Дальше честнее сказать «не доставлено», чем молчать."""
+        бот = мост(self.Моргающий(моргнёт=99))
+        self.подождать(monkeypatch)
+
+        with pytest.raises(TelegramNetworkError):
+            доставить()
+
+        assert бот.попыток == main.BLIP_TRIES
+
+    def test_не_отмечает_доставленным_то_что_не_доехало(self, мост, monkeypatch):
+        """Иначе догонялка сочтёт сообщение отданным и не вернётся за ним никогда."""
+        мост(self.Моргающий(моргнёт=99))
+        self.подождать(monkeypatch)
+
+        asyncio.run(main._try_deliver(ЧАТ, сообщение()))
+
+        assert main.topics.delivered_until(ЧАТ) is None
 
 
 class TestНепредвиденныйСбой:
