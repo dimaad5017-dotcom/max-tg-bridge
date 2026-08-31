@@ -123,6 +123,7 @@ COMMANDS = [
     BotCommand(command="join", description="вступить в чат MAX по ссылке"),
     BotCommand(command="leave", description="выйти из чата — внутри его темы"),
     BotCommand(command="del", description="ответом: стереть и здесь, и в MAX"),
+    BotCommand(command="again", description="ответом: сходить за вложением ещё раз"),
     BotCommand(command="status", description="кто в теме и когда был в сети"),
     BotCommand(command="hidden", description="прятать ли «был в сети» в MAX"),
     BotCommand(command="help", description="памятка"),
@@ -141,6 +142,7 @@ HELP = (
     "<code>/leave</code> — внутри темы: выйти из этого чата MAX. Спросит подтверждение: "
     "обратно пустят только по новому приглашению\n"
     "<code>/del</code> — ответом на сообщение: стереть его и здесь, и в MAX\n"
+    "<code>/again</code> — ответом на сообщение: сходить за его вложением ещё раз\n"
     "<code>/status</code> — внутри темы: кто это и когда был в сети\n"
     "<code>/hidden off</code> — показаться в сети (мост прячет это сам)\n"
     "<code>/help</code> — эта памятка\n\n"
@@ -150,7 +152,10 @@ HELP = (
     "мост не правит: MAX при правке потерял бы сам файл.\n"
     "Реакция под сообщением уходит в MAX и приходит обратно.\n"
     f"{SEEN_MARK} под твоим сообщением — значит, собеседник его прочитал.\n"
-    "Пропущенное за время простоя мост досылает сам при запуске.\n\n"
+    "Пропущенное за время простоя мост досылает сам при запуске.\n"
+    "Файл, который сервер MAX не отдал сразу, мост догоняет сам и присылает ответом "
+    "на «не доставлено». Сдался или не знал про него — ответь <code>/again</code>, "
+    "и он сходит заново.\n\n"
     "<b>Как стереть</b>\n"
     f"{DELETE_MARK} под сообщением или <code>/del</code> ответом на него — одно и то же: "
     "значок быстрее, команда виднее. Стирается у всех: и здесь, и в MAX.\n"
@@ -1801,6 +1806,96 @@ async def on_del_command(tg_message: TgMessage) -> None:
     # а висящее в теме «/del» — мусор. Не вышло — не беда, о главном мост уже сказал.
     with suppress(TelegramBadRequest):
         await bot.delete_message(GROUP_ID, tg_message.message_id)
+
+
+@dp.message(F.chat.id == GROUP_ID, Command("again"))
+async def on_again_command(tg_message: TgMessage) -> None:
+    """Сходить за вложением ещё раз — по требованию, а не по расписанию.
+
+    Догонялка возвращается только за тем, что записано в долг, и только пока не кончились
+    попытки. Всё, что осталось за этими двумя границами, до сих пор было потеряно навсегда:
+
+    — вложения, потерянные до того, как догонялку вообще написали: долг тогда записать
+      было нечем, и мост про них попросту не знает;
+    — вложения, за которыми догонялка сходила и сдалась, сказав «догнать не удалось».
+
+    Между тем ничего не потеряно: само сообщение лежит в чате MAX, связка с ним у моста
+    есть, а ссылку на вложение мост умеет выпрашивать заново (см. `_fresh_link`). Не
+    хватало только повода сходить. Вот он.
+
+    Стоять обязан выше `on_tg_message` — тот забирает всё, что написано в теме.
+    """
+    target = tg_message.reply_to_message
+    if target is None:
+        await tg_message.reply(
+            "Ответь этой командой на сообщение, вложение которого не доехало, — "
+            "и мост сходит за ним в MAX заново."
+        )
+        return
+
+    pair = topics.max_message_for(target.message_id)
+    if pair is None:
+        await tg_message.reply("Это сообщение через мост не проходило: в MAX его нет, и просить нечего.")
+        return
+
+    await _wait_max()
+    chat_id, max_message_id = pair
+    try:
+        message = await client.get_message(chat_id, int(max_message_id))
+    except Exception as error:
+        logger.error("MAX не отдал сообщение %s: %s", max_message_id, error)
+        await tg_message.reply(f"MAX не отдал это сообщение: {html.escape(str(error))}")
+        return
+
+    if message is None:
+        await tg_message.reply("MAX больше не отдаёт это сообщение — похоже, его там уже нет.")
+        return
+
+    got = await _fetch_again(chat_id, message, tg_message.message_thread_id, target.message_id)
+    if got:
+        logger.info("по просьбе догнали вложений: %s (сообщение MAX %s)", got, max_message_id)
+        return
+
+    await tg_message.reply(
+        "Скачать не вышло. Вложений в этом сообщении нет, либо сервер MAX их так и не отдаёт."
+    )
+
+
+async def _fetch_again(chat_id: int, message: Message, topic_id: int | None, answer_to: int) -> int:
+    """Выкачать вложения сообщения заново и прислать ответом. Сколько вышло — столько вышло.
+
+    Частичная удача тут лучше отказа: две фотографии из трёх — это две фотографии, а не
+    ноль. Поэтому идём по всем вложениям и считаем добытые, а не падаем на первом же.
+    """
+    delivered = 0
+    for attachment in message.attaches:
+        kind = getattr(attachment.type, "value", str(attachment.type))
+        # Ссылки, контакты, звонки и служебное `_source` не опознаёт и возвращает `None` —
+        # качать там нечего, и они в своё время уехали текстом. Отдельной проверки по видам
+        # не заводим: имена у MAX и у моста разные (AUDIO→voice, FILE→document), и такая
+        # проверка молча выбрасывала бы ровно то, за чем пришли.
+        source = await _source(chat_id, message, attachment, kind)
+        if source is None:
+            continue
+
+        fetched = await _download(source[1], source[2])
+        if fetched.file is None:
+            continue
+
+        method, argument = MEDIA_SENDERS[source[0]]
+        payload: dict[str, Any] = {argument: fetched.file}
+        if source[0] != "sticker":
+            payload["caption"] = "<i>сходили ещё раз</i>"
+        with suppress(Exception):
+            await _post(
+                method,
+                topic_id,
+                reply_parameters=ReplyParameters(message_id=answer_to, allow_sending_without_reply=True),
+                **payload,
+            )
+            delivered += 1
+
+    return delivered
 
 
 def _outgoing(tg_message: TgMessage) -> tuple[Callable[..., Attachment], object, str] | None:

@@ -37,6 +37,10 @@ class ФальшивыйБот:
         self.отправлено.append(("photo", прочее.get("caption"), прочее.get("reply_parameters")))
         return SimpleNamespace(message_id=len(self.отправлено))
 
+    async def send_voice(self, chat_id, voice=None, message_thread_id=None, **прочее):
+        self.отправлено.append(("voice", прочее.get("caption"), прочее.get("reply_parameters")))
+        return SimpleNamespace(message_id=len(self.отправлено))
+
     async def send_message(self, chat_id, text=None, message_thread_id=None, **прочее):
         self.отправлено.append(("text", text, прочее.get("reply_parameters")))
         return SimpleNamespace(message_id=len(self.отправлено))
@@ -389,3 +393,139 @@ class TestЧтоОбещаемВТеме:
 
         assert "догнать" not in строка
         assert "только в MAX" in строка
+
+
+class ФальшивоеПисьмо:
+    """Команда `/again`, отправленная ответом на строку «Не доставлено»."""
+
+    def __init__(self, ответ_на=СТРОКА, тема=ТЕМА):
+        self.message_id = 900
+        self.message_thread_id = тема
+        self.reply_to_message = SimpleNamespace(message_id=ответ_на) if ответ_на else None
+        self.ответы = []
+
+    async def reply(self, text, **прочее):
+        self.ответы.append(text)
+
+
+class TestСходитьЗаВложениемПоПросьбе:
+    """Догонялка возвращается сама — но только за тем, что записано в долг.
+
+    За этой границей до сих пор лежало потерянное навсегда, и потерянное дважды.
+    Первое: вложения, пропавшие до того, как догонялку написали, — долг тогда записать
+    было нечем, и мост про них не знает. Второе: те, за которыми она сходила, кончила
+    попытки и написала «догнать не удалось», — после этого просить её было нечем.
+
+    А ведь ничего не потеряно: сообщение лежит в чате MAX, связка с ним у моста есть,
+    свежую ссылку мост выпрашивать умеет. Не хватало повода сходить. `/again` — повод.
+    """
+
+    @pytest.fixture
+    def тема(self, бот, карта, monkeypatch):
+        карта.pair_messages(ЧАТ, "100", СТРОКА)
+
+        async def не_ждать():
+            return None
+
+        monkeypatch.setattr(main, "_wait_max", не_ждать)
+        return карта
+
+    def test_приносит_фотографию_ответом_на_ту_самую_строку(self, бот, тема, monkeypatch):
+        """Ту самую, которую мост когда-то не смог принести. Ради этого всё и затевалось."""
+        макс = МAXСоСвежейСсылкой()
+        monkeypatch.setattr(main, "client", макс)
+        monkeypatch.setattr(main, "_download", отдаёт(ПРИНЕСЛА))
+        письмо = ФальшивоеПисьмо()
+
+        asyncio.run(main.on_again_command(письмо))
+
+        вид, подпись, ответ = бот.отправлено[0]
+        assert вид == "photo"
+        assert ответ.message_id == СТРОКА, "фото всплыло само по себе, не пойми к чему"
+        assert "ещё раз" in подпись
+
+    def test_идёт_за_свежей_ссылкой_а_не_за_записанной(self, бот, тема, monkeypatch):
+        """Записанной у него и нет: долг не заводился. Спрашиваем само сообщение."""
+        макс = МAXСоСвежейСсылкой()
+        monkeypatch.setattr(main, "client", макс)
+        скачать = отдаёт(ПРИНЕСЛА)
+        monkeypatch.setattr(main, "_download", скачать)
+
+        asyncio.run(main.on_again_command(ФальшивоеПисьмо()))
+
+        assert макс.спрошено == [(ЧАТ, 100)]
+        assert скачать.заходы == [макс.ссылка]
+
+    def test_без_ответа_объясняет_как_пользоваться(self, бот, тема):
+        письмо = ФальшивоеПисьмо(ответ_на=None)
+
+        asyncio.run(main.on_again_command(письмо))
+
+        assert бот.отправлено == []
+        assert "Ответь этой командой" in письмо.ответы[0]
+
+    def test_на_незнакомом_сообщении_говорит_что_просить_нечего(self, бот, тема):
+        письмо = ФальшивоеПисьмо(ответ_на=12345)
+
+        asyncio.run(main.on_again_command(письмо))
+
+        assert бот.отправлено == []
+        assert "через мост не проходило" in письмо.ответы[0]
+
+    def test_стёртое_в_MAX_не_выдаёт_за_неудачу_сети(self, бот, тема, monkeypatch):
+        """Разные беды — разные слова: одну ждать бесполезно, другую можно переспросить."""
+        monkeypatch.setattr(main, "client", МAXСоСвежейСсылкой(сообщение=False))
+        письмо = ФальшивоеПисьмо()
+
+        asyncio.run(main.on_again_command(письмо))
+
+        assert "его там уже нет" in письмо.ответы[0]
+
+    def test_молчащий_сервер_не_выдаёт_за_удачу(self, бот, тема, monkeypatch):
+        """Промолчи мост — и человек уйдёт ждать фотографию, которая не придёт."""
+        monkeypatch.setattr(main, "client", МAXСоСвежейСсылкой())
+        monkeypatch.setattr(main, "_download", отдаёт(МОЛЧИТ))
+        письмо = ФальшивоеПисьмо()
+
+        asyncio.run(main.on_again_command(письмо))
+
+        assert бот.отправлено == []
+        assert "Скачать не вышло" in письмо.ответы[0]
+
+    def test_про_отказ_MAX_говорит_его_словами(self, бот, тема, monkeypatch):
+        class Отказывает:
+            async def get_message(self, chat_id, message_id):
+                raise ConnectionError("MAX не отвечает")
+
+        monkeypatch.setattr(main, "client", Отказывает())
+        письмо = ФальшивоеПисьмо()
+
+        asyncio.run(main.on_again_command(письмо))
+
+        assert "MAX не отвечает" in письмо.ответы[0]
+
+    def test_команда_видна_в_списке_команд(self):
+        """О том, чего не видно в списке, узнаёшь только если тебе об этом сказали."""
+        assert any(команда.command == "again" for команда in main.COMMANDS)
+        assert "/again" in main.HELP
+
+    def test_голосовое_не_теряется_из_за_разных_имён(self, бот, тема, monkeypatch):
+        """У MAX вид зовётся AUDIO, у моста — voice. У файла: FILE против document.
+
+        Здесь стояла проверка «качаем только то, чьё имя есть в списке отправителей», и
+        она молча выбрасывала ровно голосовые и файлы — имена-то не совпадают. На фото
+        такая ошибка невидима: там PHOTO и photo сходятся, и всё выглядит исправным.
+        Поэтому проверяем именно тем видом, на котором имена расходятся.
+        """
+
+        class MAXСГолосовым:
+            async def get_message(self, chat_id, message_id):
+                голос = SimpleNamespace(type="AUDIO", url="https://i.oneme.ru/a?r=свежая")
+                return SimpleNamespace(id=str(message_id), attaches=[голос])
+
+        monkeypatch.setattr(main, "client", MAXСГолосовым())
+        monkeypatch.setattr(main, "_download", отдаёт(ПРИНЕСЛА))
+
+        asyncio.run(main.on_again_command(ФальшивоеПисьмо()))
+
+        assert бот.отправлено and бот.отправлено[0][0] == "voice"
