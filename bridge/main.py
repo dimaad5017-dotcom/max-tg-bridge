@@ -2075,6 +2075,14 @@ async def on_tg_reaction(event: MessageReactionUpdated) -> None:
 
     chat_id, max_message_id = pair
     emoji = next((item.emoji for item in event.new_reaction if item.type == "emoji"), None)
+
+    # Сняли значок стирания — это отмена команды, а не отмена реакции. В MAX её и не было:
+    # значок наверх не уходит. Послать туда «отмени реакцию» значит попросить отменить то,
+    # чего нет, и получить отказ — а с ним и строку «реакция не ушла» на ровном месте.
+    was_mark = any(item.emoji == DELETE_MARK for item in event.old_reaction if item.type == "emoji")
+    if emoji is None and was_mark:
+        return
+
     try:
         await _wait_max()
     except MaxOffline:

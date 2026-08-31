@@ -224,6 +224,7 @@ class TestКорзинаБезСвязи:
             user=SimpleNamespace(id=999),
             message_id=СООБЩЕНИЕ,
             new_reaction=[SimpleNamespace(type="emoji", emoji=emoji)],
+            old_reaction=[],
         )
 
     def test_не_делает_вид_что_стёрла(self, мост):
