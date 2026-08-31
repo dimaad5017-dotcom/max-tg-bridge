@@ -411,6 +411,40 @@ class TestЧужаяВнутренностьМеняется:
 
         assert main._max_invoker() is макс._app
 
+    def test_бросающееся_имя_не_прячет_запасное(self, monkeypatch):
+        """С 2.4.1 `_app` — свойство, и до подключения оно бросает, а не пустует.
+
+        Страховка «не вышло по первому имени — пробуем второе» держалась на `getattr` со
+        значением по умолчанию, а он гасит только «имени нет». Первое же бросающееся имя
+        уносило нас мимо второго — и запасной дороги не стало бы ровно в тот день, когда
+        она понадобилась.
+        """
+
+        class Свойство:
+            @property
+            def _app(self):
+                raise RuntimeError("Client runtime is not initialized")
+
+            app = SimpleNamespace(invoke=lambda *_: None)
+
+        monkeypatch.setattr(main, "client", Свойство())
+
+        assert main._max_invoker() is Свойство.app
+
+    def test_не_пускающую_библиотеку_не_валит_на_обновление(self, monkeypatch):
+        """Иначе человек пойдёт откатывать версию и не починит этим ничего."""
+
+        class Молчит:
+            @property
+            def _app(self):
+                raise RuntimeError("Client runtime is not initialized")
+
+        monkeypatch.setattr(main, "client", Молчит())
+
+        with pytest.raises(RuntimeError, match="не отдал мосту связь") as беда:
+            main._max_invoker()
+        assert "перестроили" not in str(беда.value)
+
     def test_не_найдя_дороги_говорит_словами(self, monkeypatch):
         """Так выглядит следующая перестановка в библиотеке — молчать на ней нельзя."""
         monkeypatch.setattr(main, "client", SimpleNamespace(messages={}))
@@ -447,11 +481,30 @@ class TestБиблиотекаТакиУстроена:
         import pymax.app
         import pymax.base
 
-        assert "_app" in pymax.base.BaseClient.__annotations__
+        # 2.4.0 объявляет `_app` полем, 2.4.1 — свойством поверх скрытого. Мосту всё
+        # равно, каким именно: он спрашивает дорогу у живого клиента, а не у класса.
+        # Проверять надо то, на что мост опирается, — что имя вообще есть. Первая
+        # версия этой проверки смотрела только в `__annotations__` и на 2.4.1 покраснела
+        # на ровном месте: поле стало свойством, а мост при этом работал как работал.
+        объявлено = pymax.base.BaseClient
+        assert "_app" in объявлено.__annotations__ or isinstance(
+            getattr(объявлено, "_app", None), property
+        ), "имя `_app` пропало — `_max_invoker` не найдёт, чем слать реакцию"
         assert hasattr(pymax.app.App, "invoke")
 
-    def test_номер_сообщения_в_реакции_всё_ещё_строка(self):
-        """Починят наверху — обход в `_react` можно будет выбросить. Пока нельзя."""
-        from pymax.api.messages.payloads import AddReactionPayload
+    def test_обход_собирает_запрос_мимо_модели(self):
+        """Обход годен при обеих версиях — потому и держится, хотя наверху уже починили.
 
-        assert AddReactionPayload.__annotations__["message_id"] is str
+        В 2.4.0 `AddReactionPayload.message_id` — строка, и `client.add_reaction` шлёт
+        строку: MAX отвечает «Expected number» и рвёт связь. В 2.4.1 это исправили на
+        число. Заманчиво выбросить обход — нельзя: мост держит `maxapi-python>=2.4,<3`,
+        и на 2.4.0, той самой, что стоит у моста сейчас, ошибка на месте.
+
+        Но обход и не смотрит в модель: он собирает запрос руками и кладёт число. Значит,
+        верен при любой из двух — и держится не на типе поля, а вот на этих двух опкодах.
+        Выбросить его можно будет не раньше, чем нижняя граница дорастёт до 2.4.1.
+        """
+        from pymax.protocol import Opcode
+
+        assert hasattr(Opcode, "MSG_REACTION")
+        assert hasattr(Opcode, "MSG_CANCEL_REACTION")

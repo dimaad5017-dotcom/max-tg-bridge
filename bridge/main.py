@@ -2041,9 +2041,25 @@ def _max_invoker() -> Any:
     при переподключении к MAX библиотека заводит эту внутренность заново, и
     припасённая ссылка указывала бы на прошлое, уже закрытое соединение.
     """
-    for where in (getattr(client, "_app", None), getattr(client, "app", None)):
+    refused: Exception | None = None
+    for name in ("_app", "app"):
+        try:
+            where = getattr(client, name)
+        except Exception as error:
+            # Не `getattr(..., None)`: с 2.4.1 `_app` — не поле, а свойство, и до
+            # подключения к MAX оно не отсутствует, а бросает. Такое `getattr` со
+            # значением по умолчанию не гасит: он ловит только «имени нет». Запасное
+            # имя тогда не проверялось бы вовсе — страховка, которую мы тут завели,
+            # молча перестала бы быть страховкой.
+            refused = error
+            continue
         if hasattr(where, "invoke"):
             return where
+
+    if refused is not None:
+        # Дорога есть, но библиотека по ней не пускает. Врать про «перестроили изнутри»
+        # нельзя: человек полезет откатывать версию и ничего этим не починит.
+        raise RuntimeError(f"pymax не отдал мосту связь с MAX: {refused}") from refused
     raise RuntimeError("библиотеку pymax перестроили изнутри — мосту нечем послать реакцию")
 
 
