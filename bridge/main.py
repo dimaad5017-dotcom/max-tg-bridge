@@ -2124,12 +2124,36 @@ async def on_tg_reaction(event: MessageReactionUpdated) -> None:
     if event.user is not None and event.user.id == bot.id:
         return
 
+    emoji = next((item.emoji for item in event.new_reaction if item.type == "emoji"), None)
+
     pair = topics.max_message_for(event.message_id)
     if pair is None:
+        # Связки с сообщением в MAX нет: оно старше моста, или это служебная запись темы,
+        # или эхо чужого бота. Послать реакцию некуда — и вот об этом надо сказать.
+        #
+        # Раньше здесь стоял молчаливый `return`, и это ровно та беда, ради которой мост
+        # писался. Реакция появляется под сообщением, выглядит отправленной, живёт там
+        # сколько угодно — а наверх не ушло ничего, и никто не сказал ни слова. Отличить
+        # это от удачи было нельзя даже по логу: он тоже молчал.
+        #
+        # Про снятие молчим: убрать свою же реакцию — уборка, а не распоряжение мосту.
+        if emoji is None:
+            return
+
+        logger.info("реакция %s на сообщение %s: связки с MAX нет", emoji, event.message_id)
+        with suppress(Exception):
+            await bot.send_message(
+                GROUP_ID,
+                "<b>Реакция никуда не ушла.</b> Это сообщение мост не пересылал — оно "
+                "старше моста или служебное, и в MAX ему нечего соответствовать."
+                # Отдельно: «корзина» — распоряжение стереть у собеседника. Промолчи
+                # мост — и человек уйдёт уверенным, что стёр, а сообщение на месте.
+                + ("\n<i>Стирать в MAX тоже нечего.</i>" if emoji == DELETE_MARK else ""),
+                reply_to_message_id=event.message_id,
+            )
         return
 
     chat_id, max_message_id = pair
-    emoji = next((item.emoji for item in event.new_reaction if item.type == "emoji"), None)
 
     # Сняли значок стирания — это отмена команды, а не отмена реакции. В MAX её и не было:
     # значок наверх не уходит. Послать туда «отмени реакцию» значит попросить отменить то,
@@ -2186,6 +2210,13 @@ async def on_tg_reaction(event: MessageReactionUpdated) -> None:
             GROUP_ID,
             f"<b>Реакция не ушла в MAX.</b> {html.escape(str(error))}",
             reply_to_message_id=event.message_id,
+        )
+    else:
+        # Удачу пишем тоже. Без этой строки лог молчит и при успехе, и при тихом выходе
+        # раньше времени, — а это два разных ответа на вопрос «ушла ли реакция», и
+        # различать их приходилось вручную по чужим строкам про длительность обработки.
+        logger.info(
+            "реакция %s уехала в MAX: чат %s, сообщение %s", emoji or "снята", chat_id, max_message_id
         )
 
 
