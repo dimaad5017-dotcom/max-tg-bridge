@@ -41,17 +41,33 @@ class TopicMap:
         # Вложение, которое сервер MAX не отдал с первого раза. Мост вернётся за ним
         # позже, а до тех пор помнит здесь, а не в памяти: иначе перезапуск похоронил бы
         # ровно ту фотографию, за которой мост как раз и собирался вернуться.
+        #
+        # Кроме ссылки помним, из какого сообщения вложение и каким шло по счёту. Ссылка
+        # у MAX живёт недолго: закрыли мост на ночь с недогнанной фотографией — утром
+        # идти уже некуда, хотя сама фотография в MAX на месте. По номеру сообщения мост
+        # выпросит у MAX свежую ссылку и догонит.
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS late_media ("
-            "  id            INTEGER PRIMARY KEY AUTOINCREMENT,"
-            "  max_chat_id   INTEGER NOT NULL,"
-            "  topic_id      INTEGER NOT NULL,"
-            "  tg_message_id INTEGER NOT NULL,"
-            "  kind          TEXT NOT NULL,"
-            "  url           TEXT NOT NULL,"
-            "  name          TEXT NOT NULL"
+            "  id             INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  max_chat_id    INTEGER NOT NULL,"
+            "  topic_id       INTEGER NOT NULL,"
+            "  tg_message_id  INTEGER NOT NULL,"
+            "  kind           TEXT NOT NULL,"
+            "  url            TEXT NOT NULL,"
+            "  name           TEXT NOT NULL,"
+            "  max_message_id TEXT NOT NULL DEFAULT '',"
+            "  position       INTEGER NOT NULL DEFAULT 0"
             ")"
         )
+        # База с прежней версии моста этих двух столбцов не знает. Досыпаем на месте:
+        # ронять мост из-за собственного обновления — худший способ сообщить о нём.
+        было = {row[1] for row in self._db.execute("PRAGMA table_info(late_media)")}
+        for столбец, тип in (
+            ("max_message_id", "TEXT NOT NULL DEFAULT ''"),
+            ("position", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if столбец not in было:
+                self._db.execute(f"ALTER TABLE late_media ADD COLUMN {столбец} {тип}")
         # Про новую версию говорим один раз, а не при каждом запуске: мост,
         # повторяющий одно и то же, человек перестаёт читать.
         self._db.execute("CREATE TABLE IF NOT EXISTS announced (version TEXT PRIMARY KEY)")
@@ -195,21 +211,29 @@ class TopicMap:
         kind: str,
         url: str,
         name: str,
+        max_message_id: int | str = "",
+        position: int = 0,
     ) -> int:
-        """Вложение, за которым мост вернётся позже; номер строки — чтобы потом стереть."""
+        """Вложение, за которым мост вернётся позже; номер строки — чтобы потом стереть.
+
+        Номер сообщения и место вложения в нём — не для порядка. По ним мост выпросит у
+        MAX свежую ссылку, когда та, что записана здесь, протухнет.
+        """
         cursor = self._db.execute(
-            "INSERT INTO late_media (max_chat_id, topic_id, tg_message_id, kind, url, name)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (max_chat_id, topic_id, tg_message_id, kind, url, name),
+            "INSERT INTO late_media"
+            " (max_chat_id, topic_id, tg_message_id, kind, url, name, max_message_id, position)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (max_chat_id, topic_id, tg_message_id, kind, url, name, str(max_message_id), position),
         )
         self._db.commit()
         return int(cursor.lastrowid or 0)
 
-    def all_late(self) -> list[tuple[int, int, int, int, str, str, str]]:
+    def all_late(self) -> list[tuple[int, int, int, int, str, str, str, str, int]]:
         """Всё, за чем мост не успел вернуться до выключения."""
         return list(
             self._db.execute(
-                "SELECT id, max_chat_id, topic_id, tg_message_id, kind, url, name FROM late_media"
+                "SELECT id, max_chat_id, topic_id, tg_message_id, kind, url, name,"
+                " max_message_id, position FROM late_media"
             )
         )
 

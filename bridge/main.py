@@ -355,6 +355,10 @@ class Late(NamedTuple):
     kind: str
     url: str
     name: str
+    # Откуда вложение и каким шло по счёту. Ссылка у MAX живёт недолго, а сообщение
+    # лежит в чате всегда: по нему мост выпросит новую ссылку взамен протухшей.
+    message_id: str = ""
+    position: int = 0
 
 
 class Composed(NamedTuple):
@@ -911,7 +915,7 @@ async def _compose(chat_id: int, message: Message) -> Composed:
 
     media: list[Media] = []
     late: list[Late] = []
-    for attachment in message.attaches:
+    for position, attachment in enumerate(message.attaches):
         kind = getattr(attachment.type, "value", str(attachment.type))
 
         if kind == "SHARE" and attachment.url:
@@ -939,7 +943,7 @@ async def _compose(chat_id: int, message: Message) -> Composed:
         if fetched.file is None:
             lines.append(_lost(kind, fetched.problem, fetched.again))
             if fetched.again:
-                late.append(Late(source[0], source[1], source[2]))
+                late.append(Late(source[0], source[1], source[2], str(message.id), position))
             continue
 
         media.append(Media(source[0], fetched.file))
@@ -972,6 +976,27 @@ def _quoted(chat_id: int, message: Message) -> ReplyParameters | None:
 _chases: set[asyncio.Task[None]] = set()
 
 
+async def _fresh_link(chat_id: int, item: Late) -> str:
+    """Выпросить у MAX ссылку на то же вложение заново.
+
+    Записанная ссылка — расходник. MAX выдаёт их со сроком годности, и мост, закрытый на
+    ночь с недогнанной фотографией, утром шёл бы по мёртвому адресу и сдавался — хотя сама
+    фотография всё это время спокойно лежит в чате. Спрашивать надо не «дай по ссылке»,
+    а «дай вложение из вот того сообщения».
+
+    Не вышло — отдаём записанную: она хотя бы могла и не протухнуть.
+    """
+    if not item.message_id:
+        return item.url
+    message = await client.get_message(chat_id, int(item.message_id))
+    if message is None or item.position >= len(message.attaches):
+        return item.url
+    attachment = message.attaches[item.position]
+    kind = getattr(attachment.type, "value", str(attachment.type))
+    source = await _source(chat_id, message, attachment, kind)
+    return source[1] if source else item.url
+
+
 async def _chase(row_id: int, chat_id: int, topic_id: int, answer_to: int, item: Late) -> None:
     """Вернуться за вложением, которое сервер MAX не отдал сразу, и прислать его следом.
 
@@ -985,8 +1010,12 @@ async def _chase(row_id: int, chat_id: int, topic_id: int, answer_to: int, item:
     for wait in LATE_WAITS:
         await asyncio.sleep(wait)
         try:
+            link = item.url
+            with suppress(Exception):
+                # Сорвалось — не беда: пойдём по записанной ссылке, вдруг ещё живая.
+                link = await _fresh_link(chat_id, item)
             # Одной попыткой: пауза до следующего захода и так больше любой из внутренних.
-            fetched = await _download(item.url, item.name, tries=1)
+            fetched = await _download(link, item.name, tries=1)
             if fetched.file is None:
                 if fetched.again:
                     continue
@@ -1025,7 +1054,9 @@ async def _chase(row_id: int, chat_id: int, topic_id: int, answer_to: int, item:
 
 def _chase_later(chat_id: int, topic_id: int, answer_to: int, item: Late) -> None:
     """Записать вложение в долги и пустить за ним догонялку."""
-    row_id = topics.remember_late(chat_id, topic_id, answer_to, item.kind, item.url, item.name)
+    row_id = topics.remember_late(
+        chat_id, topic_id, answer_to, item.kind, item.url, item.name, item.message_id, item.position
+    )
     task = asyncio.create_task(_chase(row_id, chat_id, topic_id, answer_to, item))
     _chases.add(task)
     task.add_done_callback(_chases.discard)
@@ -1043,8 +1074,9 @@ def _resume_chases() -> None:
     двумя вещами и есть весь ответ на вопрос «где фотография».
     """
     debts = topics.all_late()
-    for row_id, chat_id, topic_id, answer_to, kind, url, name in debts:
-        task = asyncio.create_task(_chase(row_id, chat_id, topic_id, answer_to, Late(kind, url, name)))
+    for row_id, chat_id, topic_id, answer_to, kind, url, name, message_id, position in debts:
+        item = Late(kind, url, name, message_id, position)
+        task = asyncio.create_task(_chase(row_id, chat_id, topic_id, answer_to, item))
         _chases.add(task)
         task.add_done_callback(_chases.discard)
     if debts:
