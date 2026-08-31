@@ -1988,6 +1988,26 @@ def _why_telegram_refused(error: TelegramBadRequest) -> str:
     return f"Telegram отказал: {html.escape(str(error))}"
 
 
+def _max_invoker() -> Any:
+    """Тот кусок pymax, который умеет слать сырые запросы в MAX.
+
+    Лезть во внутренности библиотеки приходится (см. `_react`), и это уже сломалось.
+    Дорога сюда шла через `client.messages`, а потом библиотека заняла это имя под
+    свой список сообщений. Мост стал падать на каждой реакции — и падать молча:
+    `AttributeError` не подходил ни под один `except`, обработчик рушился целиком,
+    в теме не появлялось ничего. Ты ставишь реакцию, видишь её под сообщением и
+    уверен, что она ушла в MAX. А она никуда не уходила.
+
+    Поэтому имя ищем, а не помним, и не найдя — говорим словами. Заново каждый раз:
+    при переподключении к MAX библиотека заводит эту внутренность заново, и
+    припасённая ссылка указывала бы на прошлое, уже закрытое соединение.
+    """
+    for where in (getattr(client, "_app", None), getattr(client, "app", None)):
+        if hasattr(where, "invoke"):
+            return where
+    raise RuntimeError("библиотеку pymax перестроили изнутри — мосту нечем послать реакцию")
+
+
 async def _react(chat_id: int, max_message_id: str, emoji: str | None) -> None:
     """Ставит или снимает реакцию в MAX.
 
@@ -1997,7 +2017,7 @@ async def _react(chat_id: int, max_message_id: str, emoji: str | None) -> None:
     опкод, тот же вид запроса, но номер числом. Починят наверху — этот кусок можно выбросить.
     """
     payload: dict[str, Any] = {"chatId": chat_id, "messageId": int(max_message_id)}
-    api = client.messages.app
+    api = _max_invoker()
     if emoji:
         payload["reaction"] = {"reactionType": "EMOJI", "id": emoji}
         await api.invoke(Opcode.MSG_REACTION, payload)
@@ -2014,7 +2034,10 @@ async def _erase(chat_id: int, max_message_id: str, tg_message_id: int) -> None:
     """
     try:
         await client.delete_message(chat_id, [int(max_message_id)], for_me=False)
-    except (ApiError, ValueError, TypeError) as error:
+    except Exception as error:
+        # Тоже всё подряд: перечислять беды поимённо здесь особенно дорого. Это не
+        # украшение, а распоряжение стереть сообщение у собеседника, и непойманная
+        # беда означает, что ты уйдёшь уверенным, будто стёр, а оно осталось лежать.
         logger.error("MAX не дал удалить сообщение %s: %s", max_message_id, error)
         await bot.send_message(
             GROUP_ID,
@@ -2072,13 +2095,29 @@ async def on_tg_reaction(event: MessageReactionUpdated) -> None:
 
     if emoji == DELETE_MARK:
         # Наверх не пересылаем: это не реакция собеседнику, а распоряжение мосту.
-        await _erase(chat_id, max_message_id, event.message_id)
+        try:
+            await _erase(chat_id, max_message_id, event.message_id)
+        except Exception as error:
+            # Последняя сетка: сам `_erase` про свои беды говорит, но если он свалится
+            # на чём-то, чего не ждал, распоряжение «сотри» пропадёт беззвучно.
+            logger.exception("сорвалось на удалении сообщения %s", max_message_id)
+            with suppress(Exception):
+                await bot.send_message(
+                    GROUP_ID,
+                    f"<b>Не удалено.</b> Мост споткнулся: {html.escape(str(error))}\n"
+                    "<i>Сообщение у собеседника, скорее всего, осталось — проверь в MAX.</i>",
+                    reply_to_message_id=event.message_id,
+                )
         return
 
     try:
         await _react(chat_id, max_message_id, emoji)
-    except (ApiError, ValueError, TypeError) as error:
-        # Молча проглотить нельзя: ты видишь свою реакцию под сообщением и уверен, что она ушла.
+    except Exception as error:
+        # Ловим всё подряд, и это нарочно. Раньше здесь стоял список из трёх бед, и
+        # четвёртая — библиотека переставила у себя имя — прошла мимо: обработчик
+        # рухнул целиком, в теме не появилось ни слова, а реакция под сообщением
+        # осталась стоять. Ты видишь её и уверен, что она ушла в MAX. Список бед,
+        # о которых мост умеет говорить, всегда короче списка бед.
         logger.error("MAX не принял реакцию %s: %s", emoji, error)
         await bot.send_message(
             GROUP_ID,
