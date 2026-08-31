@@ -1037,11 +1037,18 @@ def _resume_chases() -> None:
     Мост могли закрыть в те полчаса, пока он собирался вернуться за фотографией. Без
     этого она пропала бы совсем: сообщение уже отмечено доставленным, и обычная
     догонялка по истории к нему не вернётся.
+
+    О подобранном говорим в лог. Молчание здесь однажды уже стоило получаса: долги
+    подобрались или их не было — по логу было не отличить, а разница между этими
+    двумя вещами и есть весь ответ на вопрос «где фотография».
     """
-    for row_id, chat_id, topic_id, answer_to, kind, url, name in topics.all_late():
+    debts = topics.all_late()
+    for row_id, chat_id, topic_id, answer_to, kind, url, name in debts:
         task = asyncio.create_task(_chase(row_id, chat_id, topic_id, answer_to, Late(kind, url, name)))
         _chases.add(task)
         task.add_done_callback(_chases.discard)
+    if debts:
+        logger.info("с прошлого запуска не догнано вложений: %s — иду за ними", len(debts))
 
 
 async def _deliver(chat_id: int, message: Message) -> None:
