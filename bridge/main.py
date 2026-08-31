@@ -53,22 +53,40 @@ from .storage import TopicMap
 from .version import PROJECT_URL, installed_version, newer, published_version
 
 
-def _logging_setup() -> None:
+def _screen_worthy(record: logging.LogRecord) -> bool:
+    """Пускать ли строку в окно. Фильтр стоит только на окне — в файл идёт всё.
+
+    Библиотеки пишут о своей внутренней жизни, по-английски и помногу: aiogram
+    отчитывается о каждом принятом обновлении, pymax — о каждом запросе к MAX.
+    Для разбора по файлу это золото, а в окне оно выглядит страшнее, чем есть,
+    и хоронит те несколько русских строк, ради которых окно вообще открыто.
+
+    Чужое пропускаем, только когда оно кричит: предупреждение или ошибка чужой
+    библиотеки — это уже про здоровье моста, а не про её быт.
+    """
+    return record.name.partition(".")[0] == "bridge" or record.levelno >= logging.WARNING
+
+
+def _logging_setup() -> tuple[logging.Handler, logging.Handler]:
     """Пишем и в окно, и в файл: окно можно закрыть, а разбираться придётся потом.
 
     Без файла на вопрос «почему мост молчал» ответить нечем: в окне видно только
-    последние строки, а после перезапуска не видно и их.
+    последние строки, а после перезапуска не видно и их. Он же — ответ на «в окне
+    не скопировать»: файл открывается Блокнотом, листается и копируется как угодно.
     """
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     # Не даём логу расти без края: три файла по два мегабайта — это недели работы.
     to_file = RotatingFileHandler(
         WORK_DIR / "bridge.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8"
     )
+    to_screen = logging.StreamHandler()
+    to_screen.addFilter(_screen_worthy)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[logging.StreamHandler(), to_file],
+        handlers=[to_screen, to_file],
     )
+    return to_screen, to_file
 
 
 _logging_setup()
