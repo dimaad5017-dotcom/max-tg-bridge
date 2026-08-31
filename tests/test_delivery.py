@@ -105,7 +105,7 @@ class TestЗакрытаяТема:
         бот = мост(ФальшивыйБот(закрытые=[ТЕМА]))
 
         async def одно_фото(chat_id, message):
-            return "", [main.Media("photo", b"file")]
+            return main.Composed("", [main.Media("photo", b"file")])
 
         monkeypatch.setattr(main, "_compose", одно_фото)
 

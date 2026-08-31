@@ -313,6 +313,19 @@ CAPTION_LIMIT = 1024  # Подпись под файлом короче обыч
 # если не уложились, дело не в размере, а в том, что отдача встала совсем.
 DOWNLOAD_TIMEOUT = 120
 
+# Сколько раз подряд просим у MAX один и тот же файл и с какой паузы начинаем.
+# Паузы утраиваются: 5, 15. Одна попытка была ошибкой — сервер вложений MAX умеет
+# не отвечать минуту и ожить сам, а мост в этот момент хоронил фотографию навсегда.
+# Но и держать очередь чата дольше минуты нельзя: за фотографией стоит текст.
+FETCH_TRIES = 3
+FIRST_FETCH_PAUSE = 5
+
+# Через сколько секунд после неудачи возвращаемся за вложением — и так пять раз.
+# Полчаса в сумме, и это не запас на всякий случай: сервер вложений MAX падает на
+# минуты, а не на часы. Не ожил за полчаса — не оживёт и к вечеру, а ссылка на файл
+# к тому времени всё равно протухнет, и ходить будет уже некуда.
+LATE_WAITS = (30, 120, 300, 600, 900)
+
 # Чем слать: метод бота и имя аргумента под файл.
 MEDIA_SENDERS = {
     "photo": ("send_photo", "photo"),
@@ -331,6 +344,25 @@ class Media(NamedTuple):
 class Fetched(NamedTuple):
     file: BufferedInputFile | None
     problem: str = ""
+    # Беда временная — есть смысл вернуться за файлом позже. «Слишком большое» и
+    # «нет такого файла» через полчаса не поправятся, а «сервер не ответил» поправится.
+    again: bool = False
+
+
+class Late(NamedTuple):
+    """Вложение, которое не скачалось сразу, но может скачаться позже."""
+
+    kind: str
+    url: str
+    name: str
+
+
+class Composed(NamedTuple):
+    """Готовое к отправке: текст, выкачанные файлы и то, за чем придётся вернуться."""
+
+    text: str
+    media: list[Media]
+    late: tuple[Late, ...] = ()
 
 
 class MaxOffline(Exception):
@@ -751,7 +783,7 @@ async def _source(chat_id: int, message: Message, attachment: Any, kind: str) ->
     return None
 
 
-async def _download(url: str, name: str) -> Fetched:
+async def _fetch_once(url: str, name: str) -> Fetched:
     """Тянем кусками и считаем байты сами: заявленному размеру верить нельзя.
 
     Раньше проверка смотрела на размер, объявленный в заголовке, и на этом успокаивалась.
@@ -763,26 +795,63 @@ async def _download(url: str, name: str) -> Fetched:
     и говорим словами. Сроку тоже нужен свой. По умолчанию ожидание тянется пять минут,
     а у догонялки весь бюджет — пятнадцать: три зависших файла, и она кончилась,
     толком не начавшись.
+
+    Сетевые беды отсюда летят наружу: повторять или сдаваться — решают выше.
     """
     too_big = "весит больше 50 МБ, столько Telegram не принимает"
-    try:
-        timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT, sock_connect=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session, session.get(url) as response:
-            response.raise_for_status()
-            if (response.content_length or 0) > UPLOAD_LIMIT:
-                return Fetched(None, too_big)
+    timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT, sock_connect=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session, session.get(url) as response:
+        response.raise_for_status()
+        if (response.content_length or 0) > UPLOAD_LIMIT:
+            return Fetched(None, too_big)
 
-            body = bytearray()
-            async for piece in response.content.iter_chunked(64 * 1024):
-                body += piece
-                # Обрываем на месте, а не после. Иначе смысл проверки только в том,
-                # чтобы сказать про уже съеденную память, что её съели.
-                if len(body) > UPLOAD_LIMIT:
-                    return Fetched(None, too_big)
-            return Fetched(BufferedInputFile(bytes(body), filename=name))
+        body = bytearray()
+        async for piece in response.content.iter_chunked(64 * 1024):
+            body += piece
+            # Обрываем на месте, а не после. Иначе смысл проверки только в том,
+            # чтобы сказать про уже съеденную память, что её съели.
+            if len(body) > UPLOAD_LIMIT:
+                return Fetched(None, too_big)
+        return Fetched(BufferedInputFile(bytes(body), filename=name))
+
+
+def _worth_retrying(error: BaseException) -> bool:
+    """Отказ отказу рознь: «сервер не отвечает» пройдёт само, «нет такого файла» — нет.
+
+    Разбираем по коду ответа: всё, что 4xx, — это сервер сказал «нет» осмысленно, и
+    через полчаса он скажет ровно то же. Кроме двух: 408 и 429 значат «не сейчас».
+    """
+    status = getattr(error, "status", None)
+    if isinstance(status, int) and 400 <= status < 500:
+        return status in (408, 429)
+    return True
+
+
+async def _download(url: str, name: str, tries: int = FETCH_TRIES) -> Fetched:
+    """Попросить файл у MAX, а на «сервер молчит» — попросить ещё раз.
+
+    Одна попытка стоила школьных фотографий. Сервер вложений MAX не отозвался минуту,
+    мост честно написал «не доставлено» — и на этом закончил: строка ушла удачно, значит
+    сообщение обработано, отмечено прочитанным, и догонялка за ним уже не вернётся.
+    Фотографии не стало нигде, кроме MAX, куда ты как раз и не заходишь.
+    """
+    pause = FIRST_FETCH_PAUSE
+    for _ in range(tries - 1):
+        try:
+            return await _fetch_once(url, name)
+        except (aiohttp.ClientError, TimeoutError) as error:
+            if not _worth_retrying(error):
+                logger.error("не скачать вложение %s: %s", name, error)
+                return Fetched(None, f"не скачалось ({type(error).__name__})")
+            logger.warning("вложение %s не скачалось (%s) — повторю через %s с", name, error, pause)
+            await asyncio.sleep(pause)
+            pause *= 3
+
+    try:
+        return await _fetch_once(url, name)
     except (aiohttp.ClientError, TimeoutError) as error:
         logger.error("не скачать вложение %s: %s", name, error)
-        return Fetched(None, f"не скачалось ({type(error).__name__})")
+        return Fetched(None, f"не скачалось ({type(error).__name__})", _worth_retrying(error))
 
 
 def _call_line(attachment: Any) -> str:
@@ -819,13 +888,19 @@ async def _control_line(attachment: Any) -> str:
     return f"<i>{html.escape(what)}{': ' + html.escape(details) if details else ''}</i>"
 
 
-def _lost(kind: str, reason: str) -> str:
-    """Что не доехало и почему — иначе человек не узнает, что вообще что-то было."""
+def _lost(kind: str, reason: str, later: bool = False) -> str:
+    """Что не доехало и почему — иначе человек не узнает, что вообще что-то было.
+
+    Конец строки разный не для красоты. «Смотри в MAX» — приговор, и писать его, когда
+    мост через полминуты вернётся за файлом сам, значит гнать человека ставить MAX
+    на ровном месте. А писать «догоню», когда догонять нечего, — обещание впустую.
+    """
     label = ATTACHMENT_LABELS.get(kind, kind.lower())
-    return f"<b>Не доставлено:</b> {label} — {reason}. Посмотреть можно только в MAX."
+    end = "Попробую догнать в ближайшие полчаса." if later else "Посмотреть можно только в MAX."
+    return f"<b>Не доставлено:</b> {label} — {reason}. {end}"
 
 
-async def _compose(chat_id: int, message: Message) -> tuple[str, list[Media]]:
+async def _compose(chat_id: int, message: Message) -> Composed:
     """Текст сообщения и то, что удалось выкачать; про остальное честно пишем в тексте."""
     lines: list[str] = []
     if await _is_group(chat_id):
@@ -835,6 +910,7 @@ async def _compose(chat_id: int, message: Message) -> tuple[str, list[Media]]:
         lines.append(html.escape(message.text))
 
     media: list[Media] = []
+    late: list[Late] = []
     for attachment in message.attaches:
         kind = getattr(attachment.type, "value", str(attachment.type))
 
@@ -861,7 +937,9 @@ async def _compose(chat_id: int, message: Message) -> tuple[str, list[Media]]:
 
         fetched = await _download(source[1], source[2])
         if fetched.file is None:
-            lines.append(_lost(kind, fetched.problem))
+            lines.append(_lost(kind, fetched.problem, fetched.again))
+            if fetched.again:
+                late.append(Late(source[0], source[1], source[2]))
             continue
 
         media.append(Media(source[0], fetched.file))
@@ -871,7 +949,7 @@ async def _compose(chat_id: int, message: Message) -> tuple[str, list[Media]]:
     if not lines and not media:
         lines.append(f"<i>служебное сообщение MAX ({html.escape(message.type)})</i>")
 
-    return "\n".join(lines), media
+    return Composed("\n".join(lines), media, tuple(late))
 
 
 def _quoted(chat_id: int, message: Message) -> ReplyParameters | None:
@@ -889,6 +967,83 @@ def _quoted(chat_id: int, message: Message) -> ReplyParameters | None:
     return ReplyParameters(message_id=tg_message_id, allow_sending_without_reply=True)
 
 
+# Догонялки за вложениями, которые сейчас в работе. Держим ссылки: задачу, на которую
+# никто не смотрит, мусорщик вправе убрать прямо посреди ожидания.
+_chases: set[asyncio.Task[None]] = set()
+
+
+async def _chase(row_id: int, chat_id: int, topic_id: int, answer_to: int, item: Late) -> None:
+    """Вернуться за вложением, которое сервер MAX не отдал сразу, и прислать его следом.
+
+    Приходит оно ответом на ту самую строку «Не доставлено» — иначе фотография всплывёт
+    посреди темы через полчаса, без объяснений и не пойми к чему.
+
+    Кончились попытки — говорим и об этом. Строка «не доставлено» осталась висеть с
+    обещанием догнать, и молча его не сдержать хуже, чем сразу сказать «не вышло»:
+    человек будет ждать фотографию, которая уже не придёт.
+    """
+    for wait in LATE_WAITS:
+        await asyncio.sleep(wait)
+        try:
+            # Одной попыткой: пауза до следующего захода и так больше любой из внутренних.
+            fetched = await _download(item.url, item.name, tries=1)
+            if fetched.file is None:
+                if fetched.again:
+                    continue
+                break
+
+            method, argument = MEDIA_SENDERS[item.kind]
+            payload: dict[str, Any] = {argument: fetched.file}
+            # Стикер подписи не принимает — про него скажет уже то, что он пришёл ответом.
+            if item.kind != "sticker":
+                payload["caption"] = "<i>догнали: сервер MAX отдал файл не сразу</i>"
+            await _post(
+                method,
+                topic_id,
+                reply_parameters=ReplyParameters(message_id=answer_to, allow_sending_without_reply=True),
+                **payload,
+            )
+        except Exception:
+            # Споткнулись на одном заходе — это не повод бросать остальные.
+            logger.exception("догонялка за вложением %s из чата MAX %s споткнулась", item.name, chat_id)
+            continue
+
+        logger.info("догнали %s из чата MAX %s", item.kind, chat_id)
+        topics.forget_late(row_id)
+        return
+
+    topics.forget_late(row_id)
+    logger.error("вложение %s из чата MAX %s догнать не вышло", item.name, chat_id)
+    with suppress(Exception):
+        await _post(
+            "send_message",
+            topic_id,
+            text="<i>догнать не удалось: сервер MAX так и не отдал файл</i>",
+            reply_parameters=ReplyParameters(message_id=answer_to, allow_sending_without_reply=True),
+        )
+
+
+def _chase_later(chat_id: int, topic_id: int, answer_to: int, item: Late) -> None:
+    """Записать вложение в долги и пустить за ним догонялку."""
+    row_id = topics.remember_late(chat_id, topic_id, answer_to, item.kind, item.url, item.name)
+    task = asyncio.create_task(_chase(row_id, chat_id, topic_id, answer_to, item))
+    _chases.add(task)
+    task.add_done_callback(_chases.discard)
+
+
+def _resume_chases() -> None:
+    """Подобрать долги, оставшиеся с прошлого запуска.
+
+    Мост могли закрыть в те полчаса, пока он собирался вернуться за фотографией. Без
+    этого она пропала бы совсем: сообщение уже отмечено доставленным, и обычная
+    догонялка по истории к нему не вернётся.
+    """
+    for row_id, chat_id, topic_id, answer_to, kind, url, name in topics.all_late():
+        task = asyncio.create_task(_chase(row_id, chat_id, topic_id, answer_to, Late(kind, url, name)))
+        _chases.add(task)
+        task.add_done_callback(_chases.discard)
+
+
 async def _deliver(chat_id: int, message: Message) -> None:
     if topics.tg_message_for(chat_id, message.id) is not None:
         # Это сообщение уже в теме. Живое событие и догонялка приносят одно и то же,
@@ -896,7 +1051,8 @@ async def _deliver(chat_id: int, message: Message) -> None:
         return
 
     topic_id = await _ensure_topic(chat_id)
-    caption, media = await _compose(chat_id, message)
+    made = await _compose(chat_id, message)
+    caption, media = made.text, made.media
     reply = _quoted(chat_id, message)
 
     # Подпись вешаем на первый файл; стикер подписи не принимает, длинный текст в неё не влезет.
@@ -926,6 +1082,11 @@ async def _deliver(chat_id: int, message: Message) -> None:
 
     if first is not None:
         topics.pair_messages(chat_id, message.id, first.message_id)
+        # Строка «не доставлено» уже в теме, и сообщение вот-вот станет доставленным
+        # и прочитанным — обратной дороги через историю не будет. Значит, за файлом
+        # надо возвращаться отдельно, и помнить об этом надо начиная с этой секунды.
+        for item in made.late:
+            _chase_later(chat_id, topic_id, first.message_id, item)
     topics.remember_delivered(chat_id, message.time)
 
     # Раз сообщение доехало в Telegram — в MAX оно прочитано: иначе собеседник
@@ -1190,7 +1351,7 @@ async def on_max_edit(message: Message, client: Client) -> None:
     if tg_message_id is None:
         return
 
-    text, _ = await _compose(message.chat_id, message)
+    text = (await _compose(message.chat_id, message)).text
     # Правку показываем на месте старого сообщения, поэтому разложить её на несколько,
     # как обычную длинную, нельзя: сообщение здесь одно. Тогда обрезаем — но с пометкой.
     text = _fit(f"{text}\n<i>(исправлено)</i>", MESSAGE_LIMIT)
@@ -2004,6 +2165,9 @@ async def main() -> None:
     # ждать из-за них запуск или падать вместе с ними — незачем. Имена держим, иначе
     # задачу без ссылки соберёт мусорщик прямо на ходу.
     extras = [asyncio.create_task(_tell_about_update()), asyncio.create_task(_watch_new_chats())]
+
+    # За вложениями, которые не скачались перед прошлым выключением, тоже надо вернуться.
+    _resume_chases()
 
     halves = [asyncio.create_task(client.start()), asyncio.create_task(dp.start_polling(bot))]
     # Половина моста без второй бесполезна и незаметна: Telegram продолжит принимать

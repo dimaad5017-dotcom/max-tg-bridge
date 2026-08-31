@@ -38,6 +38,20 @@ class TopicMap:
             "  tg_message_id INTEGER NOT NULL"
             ")"
         )
+        # Вложение, которое сервер MAX не отдал с первого раза. Мост вернётся за ним
+        # позже, а до тех пор помнит здесь, а не в памяти: иначе перезапуск похоронил бы
+        # ровно ту фотографию, за которой мост как раз и собирался вернуться.
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS late_media ("
+            "  id            INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  max_chat_id   INTEGER NOT NULL,"
+            "  topic_id      INTEGER NOT NULL,"
+            "  tg_message_id INTEGER NOT NULL,"
+            "  kind          TEXT NOT NULL,"
+            "  url           TEXT NOT NULL,"
+            "  name          TEXT NOT NULL"
+            ")"
+        )
         # Про новую версию говорим один раз, а не при каждом запуске: мост,
         # повторяющий одно и то же, человек перестаёт читать.
         self._db.execute("CREATE TABLE IF NOT EXISTS announced (version TEXT PRIMARY KEY)")
@@ -172,6 +186,37 @@ class TopicMap:
         )
         self._db.commit()
         return mark
+
+    def remember_late(
+        self,
+        max_chat_id: int,
+        topic_id: int,
+        tg_message_id: int,
+        kind: str,
+        url: str,
+        name: str,
+    ) -> int:
+        """Вложение, за которым мост вернётся позже; номер строки — чтобы потом стереть."""
+        cursor = self._db.execute(
+            "INSERT INTO late_media (max_chat_id, topic_id, tg_message_id, kind, url, name)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (max_chat_id, topic_id, tg_message_id, kind, url, name),
+        )
+        self._db.commit()
+        return int(cursor.lastrowid or 0)
+
+    def all_late(self) -> list[tuple[int, int, int, int, str, str, str]]:
+        """Всё, за чем мост не успел вернуться до выключения."""
+        return list(
+            self._db.execute(
+                "SELECT id, max_chat_id, topic_id, tg_message_id, kind, url, name FROM late_media"
+            )
+        )
+
+    def forget_late(self, row_id: int) -> None:
+        """Догнали или окончательно не догнали — в обоих случаях возвращаться больше не за чем."""
+        self._db.execute("DELETE FROM late_media WHERE id = ?", (row_id,))
+        self._db.commit()
 
     def delivered_until(self, max_chat_id: int) -> int | None:
         """Время последнего сообщения, доехавшего до Telegram: с него догоняем после простоя."""

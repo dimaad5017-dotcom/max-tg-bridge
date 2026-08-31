@@ -227,8 +227,7 @@ class TestМеткиЛюдей:
 
         monkeypatch.setattr(main, "_sender_name", имя)
         сообщение = SimpleNamespace(sender=sender, text="Доброе утро", attaches=[])
-        текст, _ = asyncio.run(main._compose(500, сообщение))
-        return текст
+        return asyncio.run(main._compose(500, сообщение)).text
 
     def test_в_группе_метка_стоит_перед_именем(self, метки, monkeypatch):
         строка = self.строка(monkeypatch, 386174042)
