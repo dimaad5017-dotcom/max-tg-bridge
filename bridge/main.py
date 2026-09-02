@@ -929,10 +929,12 @@ def _lost(kind: str, reason: str, later: bool = False) -> str:
 
 async def _compose(chat_id: int, message: Message) -> Composed:
     """Текст сообщения и то, что удалось выкачать; про остальное честно пишем в тексте."""
-    lines: list[str] = []
+    header: str | None = None
     if await _is_group(chat_id):
         name = html.escape(await _sender_name(message.sender))
-        lines.append(f"{_mark(chat_id, message.sender)} <b>{name}</b>")
+        header = f"{_mark(chat_id, message.sender)} <b>{name}</b>"
+
+    lines: list[str] = []
     if message.text:
         lines.append(html.escape(message.text))
 
@@ -972,9 +974,15 @@ async def _compose(chat_id: int, message: Message) -> Composed:
         media.append(Media(source[0], fetched.file))
 
     # Ни текста, ни вложений — так выглядят служебные отметки MAX. Лучше показать их
-    # одной строкой, чем молча проглотить и оставить человека гадать.
+    # одной строкой, чем молча проглотить и оставить человека гадать. Проверяем до того,
+    # как впереди встанет заголовок с именем: иначе в групповых чатах он один и заполнит
+    # `lines`, и это условие перестанет срабатывать вовсе — мост будет слать пустые
+    # сообщения с одним только именем отправителя.
     if not lines and not media:
         lines.append(f"<i>служебное сообщение MAX ({html.escape(message.type)})</i>")
+
+    if header is not None:
+        lines.insert(0, header)
 
     return Composed("\n".join(lines), media, tuple(late))
 
